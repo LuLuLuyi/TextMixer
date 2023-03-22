@@ -619,7 +619,22 @@ class FinetuneTrainer(Trainer):
 
         # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
-
+        
+        # option add token shuffle here
+        num_instances = self.model.config.num_instances
+        for inputs in tqdm(train_dataloader, desc="tokenshuffle for train_dataloader"):
+            input_ids = inputs['input_ids']
+            batch_size, sequence_length = input_ids.size()
+            modified_batch_size = batch_size // num_instances
+            input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
+            for modified_batch_idx in range(modified_batch_size):
+                for word_idx in range(1, sequence_length):
+                    import random
+                    shuffled_idx = random.sample(range(0, num_instances), num_instances)
+                    input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
+            input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
+            inputs['input_ids'] = input_ids
+            
         # Setting up training control variables:
         # number of training epochs: num_train_epochs
         # number of training steps per epoch: num_update_steps_per_epoch
@@ -802,20 +817,22 @@ class FinetuneTrainer(Trainer):
             self.control = self.callback_handler.on_epoch_begin(
                 self.args, self.state, self.control
             )
-            # option add token shuffle here
-            num_instances = 10
-            for inputs in tqdm(epoch_iterator, desc="tokenshuffle for dataset:"):
-                input_ids = inputs['input_ids']
-                batch_size, sequence_length = input_ids.size()
-                modified_batch_size = batch_size // num_instances
-                input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
-                for modified_batch_idx in range(modified_batch_size):
-                    for word_idx in range(1, sequence_length):
-                        import random
-                        shuffled_idx = random.sample(range(0, num_instances), num_instances)
-                        input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
-                input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
-                inputs['input_ids'] = input_ids
+            
+            # # option add token shuffle here
+            # num_instances = self.model.config.num_instances
+            # for inputs in tqdm(epoch_iterator, desc=f"tokenshuffle for epoch{epoch}"):
+            #     input_ids = inputs['input_ids']
+            #     batch_size, sequence_length = input_ids.size()
+            #     modified_batch_size = batch_size // num_instances
+            #     input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
+            #     for modified_batch_idx in range(modified_batch_size):
+            #         for word_idx in range(1, sequence_length):
+            #             import random
+            #             shuffled_idx = random.sample(range(0, num_instances), num_instances)
+            #             input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
+            #     input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
+            #     inputs['input_ids'] = input_ids
+            
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
@@ -1288,6 +1305,22 @@ class FinetuneTrainer(Trainer):
             raise ValueError("eval_dataset must implement __len__")
 
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        
+        # option add token shuffle here
+        num_instances = self.model.config.num_instances
+        for inputs in tqdm(eval_dataloader, desc="tokenshuffle for eval_dataloader:"):
+            input_ids = inputs['input_ids']
+            batch_size, sequence_length = input_ids.size()
+            modified_batch_size = batch_size // num_instances
+            input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
+            for modified_batch_idx in range(modified_batch_size):
+                for word_idx in range(1, sequence_length):
+                    import random
+                    shuffled_idx = random.sample(range(0, num_instances), num_instances)
+                    input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
+            input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
+            inputs['input_ids'] = input_ids
+            
         start_time = time.time()
 
         compute_metrics = None

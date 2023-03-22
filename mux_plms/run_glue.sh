@@ -1,3 +1,4 @@
+#!/bin/bash
 # batch size based on large/base/small
 # arguments for best metric
 # other parameters
@@ -282,11 +283,10 @@ CMD="python run_glue.py \
 --per_device_train_batch_size $BATCH_SIZE \
 --per_device_eval_batch_size $BATCH_SIZE \
 --learning_rate $LEARNING_RATE \
---output_dir $OUTPUT_DIR \
---run_name  $RUN_NAME \
+--output_dir ${OUTPUT_DIR}_tokenshuffle_dataloader \
+--run_name  sst2-mux5-tokenshuffle-dataloader \
 --logging_steps 100 \
---dataloader_drop_last $DATALOADER_DROP_LAST \
---dataloader_num_workers 4 \
+--dataloader_drop_last 1 \
 --warmup_ratio 0.1 \
 --lr_scheduler_type linear \
 --retrieval_percentage $RETRIEVAL_PERCENTAGE \

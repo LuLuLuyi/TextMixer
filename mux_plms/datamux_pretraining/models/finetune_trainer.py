@@ -802,7 +802,20 @@ class FinetuneTrainer(Trainer):
             self.control = self.callback_handler.on_epoch_begin(
                 self.args, self.state, self.control
             )
-
+            # option add token shuffle here
+            num_instances = 10
+            for inputs in tqdm(epoch_iterator, desc="tokenshuffle for dataset:"):
+                input_ids = inputs['input_ids']
+                batch_size, sequence_length = input_ids.size()
+                modified_batch_size = batch_size // num_instances
+                input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
+                for modified_batch_idx in range(modified_batch_size):
+                    for word_idx in range(1, sequence_length):
+                        import random
+                        shuffled_idx = random.sample(range(0, num_instances), num_instances)
+                        input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
+                input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
+                inputs['input_ids'] = input_ids
             for step, inputs in enumerate(epoch_iterator):
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:

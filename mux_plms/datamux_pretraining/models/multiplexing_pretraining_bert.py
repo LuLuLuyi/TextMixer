@@ -24,6 +24,7 @@ from transformers.models.electra.modeling_electra import (
 import math
 from transformers.activations import gelu
 from transformers.utils import logging
+import random
 
 logger = logging.get_logger(__name__)
 
@@ -634,6 +635,14 @@ class MuxedBertForSequenceClassification(BertPreTrainedModel):
             input_ids[:, 0:1] = cls_tokens
             modified_seq_length = seq_length
             special_tokens_end_position = 0
+            # token shuffle
+            # batch_size, sequence_length = input_ids.size()
+            # input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
+            # for modified_batch_idx in range(modified_batch_size):
+            #     for word_idx in range(1, sequence_length):
+            #         shuffled_idx = random.sample(range(0, num_instances), num_instances)
+            #         input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
+            # input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
 
         else:
             raise NotImplementedError()

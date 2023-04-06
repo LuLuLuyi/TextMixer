@@ -67,6 +67,7 @@ class InversionPLM(nn.Module):
         pred = torch.argmax(F.softmax(logits,dim=-1), dim=2)
         return logits, pred
     
+    
 def evaluate_with_knn_attack(model, dataloader, metric, accelerator, topk=5, target_layer=3):
     model.eval()
     samples_seen = 0
@@ -99,7 +100,7 @@ def evaluate_with_knn_attack(model, dataloader, metric, accelerator, topk=5, tar
         
     eval_metric = metric.compute()
     return eval_metric
-    
+
 def dataloader2memory(dataloader, model, target_layer=3, device='cuda'):
     token_shuffle = True
     features = []
@@ -111,11 +112,13 @@ def dataloader2memory(dataloader, model, target_layer=3, device='cuda'):
             batch_size, sequence_length = batch["input_ids"].size()
             all_hidden_states = [] 
             all_mux_sentence_ids = []
+            all_real_sentence_pos = []
             for idx in range(batch_size):
                 sample_list = list(range(0,batch_size))
                 sample_list.remove(idx)
                 mux_sentence_ids = random.sample(sample_list, k=10-1)
-                mux_sentence_ids.insert(random.randint(0, len(mux_sentence_ids)),idx)
+                real_sentence_pos = random.randint(0, len(mux_sentence_ids))
+                mux_sentence_ids.insert(real_sentence_pos, idx)
                 
                 mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()} 
                 # token shuffle
@@ -128,11 +131,56 @@ def dataloader2memory(dataloader, model, target_layer=3, device='cuda'):
                 
                 all_mux_sentence_ids.append(mux_sentence_ids)
                 all_hidden_states.append(hidden_states)
+                all_real_sentence_pos.append(real_sentence_pos)
             input_ids = batch['input_ids'].to('cpu')
             attention_mask = batch['attention_mask'].to('cpu')
             target_hidden_states = torch.cat(all_hidden_states, dim=0).to('cpu')
             all_mux_sentence_ids = torch.tensor(all_mux_sentence_ids)
-            features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask, 'mux_sentence_ids': all_mux_sentence_ids})
+            all_real_sentence_pos = torch.tensor(all_real_sentence_pos)
+            features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask, 'mux_sentence_ids': all_mux_sentence_ids, 'all_real_sentence_pos': all_real_sentence_pos})
+        pro_bar.update(1)
+    return features
+
+def dataloader2memory_eval(dataloader, model, target_layer=3, device='cuda'):
+    token_shuffle = True
+    features = []
+    pro_bar = tqdm(range(len(dataloader)))
+    model.eval()
+    real_sentence_pos_list_idx = 0
+    real_sentence_pos_list = random.sample(list(range(870)), k=870)
+    for batch in dataloader:
+        with torch.no_grad():
+            batch = {key:value.to(device) for key,value in batch.items()}
+            batch_size, sequence_length = batch["input_ids"].size()
+            all_hidden_states = []
+            all_mux_sentence_ids = []
+            all_real_sentence_pos = []
+            for idx in range(batch_size):
+                sample_list = list(range(0, batch_size))
+                sample_list.remove(idx)
+                mux_sentence_ids = random.sample(sample_list, k=10-1)
+                real_sentence_pos = real_sentence_pos_list[real_sentence_pos_list_idx] % 10
+                real_sentence_pos_list_idx += 1
+                mux_sentence_ids.insert(real_sentence_pos, idx)
+                
+                mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()} 
+                # token shuffle
+                # if token_shuffle:
+                #     for idx in range(sequence_length):
+                #         shuffled_idx = random.sample(range(0,10), 10)
+                #         mux_minibatch['input_ids'][:, idx] = mux_minibatch['input_ids'][shuffled_idx, idx]
+                outputs = model(**mux_minibatch)
+                hidden_states = outputs.hidden_states[target_layer][:,11:,]
+                
+                all_mux_sentence_ids.append(mux_sentence_ids)
+                all_hidden_states.append(hidden_states)
+                all_real_sentence_pos.append(real_sentence_pos)
+            input_ids = batch['input_ids'].to('cpu')
+            attention_mask = batch['attention_mask'].to('cpu')
+            target_hidden_states = torch.cat(all_hidden_states, dim=0).to('cpu')
+            all_mux_sentence_ids = torch.tensor(all_mux_sentence_ids)
+            all_real_sentence_pos = torch.tensor(all_real_sentence_pos)
+            features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask, 'mux_sentence_ids': all_mux_sentence_ids, 'all_real_sentence_pos': all_real_sentence_pos})
         pro_bar.update(1)
     return features
 
@@ -380,7 +428,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     
     print('load dataloader to memory')
     train_dataloader = dataloader2memory(train_dataloader, model, config.target_layer, device)
-    eval_dataloader = dataloader2memory(eval_dataloader, model, config.target_layer, device)
+    eval_dataloader = dataloader2memory_eval(eval_dataloader, model, config.target_layer, device)
     print('done')
     
     total_step = len(train_dataloader) * epochs
@@ -400,6 +448,9 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     model_attack_acc = 0
     hit_tokens = {}
     mux_tokens_list = []
+    real_sentence_pos_list = [0 for _ in range(10)]
+    hit_sentence_pos_list = [0 for _ in range(10)]
+    total_real_sentence_words = [0 for _ in range(10)]
     print('################# start train inversion model #################')
     for epoch in range(epochs):
         for step, batch in enumerate(train_dataloader):
@@ -432,7 +483,10 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
         if True:
             hit_cnt = 0
             total_cnt = 0
-            case_study_dir = 'datamux-sst2-10'
+            case_study_dir = 'datamux-sst2-10-hit-sentence-2'
+            if not os.path.exists(os.path.join('/root/mixup/mixup_roberta/case_study',case_study_dir)):
+                os.makedirs(os.path.join('/root/mixup/mixup_roberta/case_study',case_study_dir))
+                
             with open(f'/root/mixup/mixup_roberta/case_study/{case_study_dir}/inversion_epoch{epoch}.txt','w') as f:
                 for batch in eval_dataloader:
                     batch = {key:value.to(device) for key,value in batch.items()}
@@ -464,7 +518,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                     total_cnt += eval_label.shape[0]
                     # 进行case_study记录
                     top10_preds = torch.topk(pred_logits, k=10)[1]
-                    for seq_idx in range(0,  batch['input_ids'].size()[0]):
+                    for seq_idx in range(0, batch['input_ids'].size()[0]):
                         f.write('-----------------------------datamux-sst2-10 case start-----------------------------\n')
                         # titile
                         f.write(f"{'origin_token':<20s} | ")
@@ -480,20 +534,34 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                                 f.write(" | ")
                                 for rec_idx in range(10):
                                     f.write(f"{tokenizer.decode(top10_preds[seq_idx][word_idx][rec_idx]):<20s}")
+                                
                                 # if token hited in last epoch
-                                if epoch == epochs - 1: 
+                                if epoch == epochs - 1:
+                                    # 统计 real_token_pos
+                                    real_sentence_pos = batch['all_real_sentence_pos'][seq_idx]
+                                    total_real_sentence_words[real_sentence_pos] += 1
                                     if batch['input_ids'][seq_idx][word_idx] == top10_preds[seq_idx][word_idx][0]:
                                         hit_tokens[tokenizer.decode(batch['input_ids'][seq_idx][word_idx])] = hit_tokens.get(tokenizer.decode(batch['input_ids'][seq_idx][word_idx]), 0) + 1
                                         mux_tokens = [tokenizer.decode(batch['input_ids'][batch['mux_sentence_ids'][seq_idx][mux_idx]][word_idx]) for mux_idx in range(10)]
                                         mux_tokens_list.append(mux_tokens)
+                                        hit_sentence_pos_list[real_sentence_pos] += 1
                                 f.write("\n")
                         f.write('-----------------------------datamux-sst2-10 case end-----------------------------\n')
                         f.write('\n')
+                    if epoch == epochs - 1:
+                        for real_sentence_pos in batch['all_real_sentence_pos']:
+                            real_sentence_pos_list[real_sentence_pos] += 1
             model_attack_acc = hit_cnt/total_cnt
             print('attack acc:{}'.format(hit_cnt/total_cnt))
             if use_wandb:
                 wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
-    
+    with open(f'/root/mixup/mixup_roberta/case_study/{case_study_dir}/hit_sentence_pos_stat.txt','w') as f:
+        f.write(f'sample real_sentence_pos statatic\n')
+        for mux_idx, real_sentence_pos in enumerate(real_sentence_pos_list):
+            f.write(f'mux_idx:{mux_idx}\tsample_times:{real_sentence_pos}\n')
+        f.write(f'hit sentence_pos times and probs statatic\n')
+        for mux_idx in range(10):
+            f.write(f'mux_idx:{mux_idx}\thit_times:{hit_sentence_pos_list[mux_idx]}\thit_probs:{hit_sentence_pos_list[mux_idx] / total_real_sentence_words[mux_idx]}\n')
     with open(f'/root/mixup/mixup_roberta/case_study/{case_study_dir}/hit_tokens_stat.txt','w') as f:
         hit_tokens = sorted(hit_tokens.items(), key=lambda x: x[1], reverse=True)
         for (key, value) in hit_tokens:
@@ -515,7 +583,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
             for mux_token in key:
                 f.write(f"{mux_token:<15s}")
             f.write('\n')
-    torch.save(model, 'mixup_roberta/ckpts/sst2/datamux-sst2-10/inversion_model_token_shuffle.pt')
+    torch.save(model, '/root/mixup/mixup_roberta/ckpts/sst2/datamux-sst2-10/inversion_model_1.pt')
     return model_attack_acc
 
 def knn_attack(model, dataloader, use_wandb, topk=5, target_layer=3):
@@ -1004,14 +1072,14 @@ def main():
     else:
         metric = evaluate.load("accuracy")
         
-    # evaluation
-    eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, target_layer=args.target_layer, topk=10)
-    if args.use_wandb:
-        # knn_name = 'knn_top{}'.format(knn_topk)
-        for key,value in eval_metric.items():
-            wandb.log({f'metric/{key}':value})
+    # # evaluation
+    # eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, target_layer=args.target_layer, topk=10)
+    # if args.use_wandb:
+    #     # knn_name = 'knn_top{}'.format(knn_topk)
+    #     for key,value in eval_metric.items():
+    #         wandb.log({f'metric/{key}':value})
     
-    # model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=args.use_wandb)
+    model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=args.use_wandb)
     wandb.finish()
     
    

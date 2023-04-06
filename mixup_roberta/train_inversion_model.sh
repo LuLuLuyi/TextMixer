@@ -1,4 +1,4 @@
-GPU=0
+GPU=3
 MODEL=princeton-nlp/datamux-sst2-10
 
 for TASK_NAME in sst2

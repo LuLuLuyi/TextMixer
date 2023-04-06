@@ -51,6 +51,9 @@ from datamux_pretraining.models.multiplexing_pretraining_electra import (
 )
 from datamux_pretraining.models.finetune_trainer import FinetuneTrainer
 
+from datamux_pretraining.models.tokenshuffle_data_collator import tokenshuffle_data_collator
+from torch.utils.data import DataLoader
+
 task_to_keys = {
     "cola": ("sentence", None),
     "mnli": ("premise", "hypothesis"),
@@ -269,6 +272,10 @@ class ModelArguments:
         default=1.0,
         metadata={"help": "Coefficient for task loss"},
     )
+    epsilon: Optional[float] = field(
+        default=1.0,
+        metadata={"help": "the scale for laplace noise"},
+    )
     learn_muxing: Optional[int] = field(
         default=0,
         metadata={"help": "whether instance embeddings are learnt or not"},
@@ -465,6 +472,11 @@ def main():
     config.task_loss_coeff = model_args.task_loss_coeff
     config.learn_muxing = model_args.learn_muxing
     config.num_hidden_demux_layers = model_args.num_hidden_demux_layers
+    config.add_noise = 0
+    config.token_shuffle = 0
+    config.add_embedding_noise = 1
+    config.epsilon = model_args.epsilon
+    config.target_layer = 3
     model_path_supplied = model_args.model_name_or_path is not None
     if model_args.should_mux:
         model_cls = version_2_modelcls[model_args.model_version]
@@ -553,7 +565,7 @@ def main():
         result = tokenizer(
             *args, padding=padding, max_length=max_seq_length, truncation=True
         )
-
+        
         # Map labels to IDs (not necessary for GLUE tasks)
         if label_to_id is not None and "label" in examples:
             result["label"] = [
@@ -630,6 +642,9 @@ def main():
         data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
     else:
         data_collator = None
+        
+    if config.token_shuffle:
+        data_collator = tokenshuffle_data_collator
 
     trainer = FinetuneTrainer(
         model=model,
@@ -725,8 +740,8 @@ def main():
                         else:
                             item = label_list[item]
                             writer.write(f"{index}\t{item}\n")
-
-
+    
+    
 def _mp_fn(index):
     # For xla_spawn (TPUs)
     main()

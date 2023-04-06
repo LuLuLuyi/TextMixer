@@ -274,7 +274,7 @@ fi
 
 BATCH_SIZE=32
 BATCH_SIZE=$(($BATCH_SIZE * NUM_INSTANCES))
-
+EPSILON=0.5
 CMD="python run_glue.py \
 --tokenizer_name bert-base-uncased \
 --config_name ${CONFIG_NAME} \
@@ -283,8 +283,8 @@ CMD="python run_glue.py \
 --per_device_train_batch_size $BATCH_SIZE \
 --per_device_eval_batch_size $BATCH_SIZE \
 --learning_rate $LEARNING_RATE \
---output_dir ${OUTPUT_DIR}_tokenshuffle_dataloader \
---run_name  sst2-mux5-tokenshuffle-dataloader \
+--output_dir ${OUTPUT_DIR}_embedding_noise_eps${EPSILON} \
+--run_name  sst2_mux${NUM_INSTANCES}_embedding_noise_eps${EPSILON} \
 --logging_steps 100 \
 --dataloader_drop_last 1 \
 --warmup_ratio 0.1 \
@@ -304,7 +304,8 @@ CMD="python run_glue.py \
 --fp16 \
 --metric_for_best_model ${BEST_METRIC} \
 --num_hidden_demux_layers 3 \
---save_total_limit 1"
+--save_total_limit 1 \
+--epsilon $EPSILON"
 if [ "$DO_TRAIN" -eq 1 ]; then
         CMD="${CMD} --do_train"
 fi

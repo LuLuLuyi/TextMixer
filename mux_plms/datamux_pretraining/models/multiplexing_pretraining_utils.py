@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from transformers.modeling_outputs import SequenceClassifierOutput, ModelOutput
 from transformers.activations import gelu
 
+
 class IndexPosDemuxModule(nn.Module):
     def __init__(self, config):
         super().__init__()

@@ -621,19 +621,22 @@ class FinetuneTrainer(Trainer):
         train_dataloader = self.get_train_dataloader()
         
         # option add token shuffle here
-        num_instances = self.model.config.num_instances
-        for inputs in tqdm(train_dataloader, desc="tokenshuffle for train_dataloader"):
-            input_ids = inputs['input_ids']
-            batch_size, sequence_length = input_ids.size()
-            modified_batch_size = batch_size // num_instances
-            input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
-            for modified_batch_idx in range(modified_batch_size):
-                for word_idx in range(1, sequence_length):
-                    import random
-                    shuffled_idx = random.sample(range(0, num_instances), num_instances)
-                    input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
-            input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
-            inputs['input_ids'] = input_ids
+        # To do accelerate the process
+        # num_instances = self.model.config.num_instances
+        # for inputs in tqdm(train_dataloader, desc="tokenshuffle for train_dataloader"):
+        #     input_ids = inputs['input_ids']
+        #     batch_size, sequence_length = input_ids.size()
+        #     modified_batch_size = batch_size // num_instances
+        #     input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
+        #     for modified_batch_idx in range(modified_batch_size):
+        #         for word_idx in range(1, sequence_length):
+        #             import random
+        #             shuffled_idx = random.sample(range(0, num_instances), num_instances)
+        #             input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
+        #     input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
+        #     inputs['input_ids'] = input_ids
+            
+
             
         # Setting up training control variables:
         # number of training epochs: num_train_epochs
@@ -1307,19 +1310,19 @@ class FinetuneTrainer(Trainer):
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
         
         # option add token shuffle here
-        num_instances = self.model.config.num_instances
-        for inputs in tqdm(eval_dataloader, desc="tokenshuffle for eval_dataloader:"):
-            input_ids = inputs['input_ids']
-            batch_size, sequence_length = input_ids.size()
-            modified_batch_size = batch_size // num_instances
-            input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
-            for modified_batch_idx in range(modified_batch_size):
-                for word_idx in range(1, sequence_length):
-                    import random
-                    shuffled_idx = random.sample(range(0, num_instances), num_instances)
-                    input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
-            input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
-            inputs['input_ids'] = input_ids
+        # num_instances = self.model.config.num_instances
+        # for inputs in tqdm(eval_dataloader, desc="tokenshuffle for eval_dataloader:"):
+        #     input_ids = inputs['input_ids']
+        #     batch_size, sequence_length = input_ids.size()
+        #     modified_batch_size = batch_size // num_instances
+        #     input_ids = input_ids.view(modified_batch_size , num_instances, sequence_length)
+        #     for modified_batch_idx in range(modified_batch_size):
+        #         for word_idx in range(1, sequence_length):
+        #             import random
+        #             shuffled_idx = random.sample(range(0, num_instances), num_instances)
+        #             input_ids[modified_batch_idx, :, word_idx] = input_ids[modified_batch_idx, [shuffled_idx], word_idx]
+        #     input_ids = input_ids.view(modified_batch_size * num_instances, sequence_length)
+        #     inputs['input_ids'] = input_ids
             
         start_time = time.time()
 

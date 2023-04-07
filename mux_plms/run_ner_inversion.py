@@ -31,6 +31,7 @@ from datasets import load_dataset, load_metric, ClassLabel
 from transformers import (
     AutoConfig,
     AutoTokenizer,
+    AutoModelForMaskedLM,
     HfArgumentParser,
     TrainingArguments,
     set_seed,
@@ -49,6 +50,14 @@ from datamux_pretraining.models.multiplexing_pretraining_bert import (
     MuxedBertForTokenClassification,
 )
 from transformers.trainer_utils import get_last_checkpoint
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import wandb
+import random
+import evaluate
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +66,222 @@ version_2_modelcls = {
     "datamux_legacy": RobertaTokenClassificationMuxed,
     "bert": MuxedBertForTokenClassification,
 }
+
+class InversionPLM(nn.Module):
+    def __init__(self, config, model_name_or_path='roberta-base'):
+        super(InversionPLM, self).__init__()
+        self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
+        self.loss = torch.nn.CrossEntropyLoss()
+    
+    def forward(self, x, label, attention_mask=None):
+        outputs = self.model(inputs_embeds=x, labels=label, attention_mask=attention_mask)
+        return outputs.logits, outputs.loss
+
+    def predict(self, x, label=None, attention_mask=None):
+        outputs = self.model(inputs_embeds=x, labels=label, attention_mask=attention_mask)
+        logits = outputs.logits
+        pred = torch.argmax(F.softmax(logits,dim=-1), dim=2)
+        return logits, pred
+    
+    
+def dataloader2memory(dataloader, model, num_instances, target_layer=3, device='cuda'):
+    token_shuffle = True
+    features = []
+    pro_bar = tqdm(range(len(dataloader)))
+    model.eval()
+    for batch in dataloader:
+        with torch.no_grad():
+            if 'idx' in batch.keys():
+                batch.pop("idx")
+            batch = {key:value.to(device) for key,value in batch.items()}
+            batch_size, sequence_length = batch["input_ids"].size()
+            all_hidden_states = [] 
+            all_mux_sentence_ids = []
+            for idx in range(batch_size):
+                sample_list = list(range(0,batch_size))
+                sample_list.remove(idx)
+                mux_sentence_ids = random.sample(sample_list, k=num_instances-1)
+                mux_sentence_ids.insert(random.randint(0, len(mux_sentence_ids)),idx)
+                
+                mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()} 
+                # token shuffle
+                # if token_shuffle:
+                #     for idx in range(sequence_length):
+                #         shuffled_idx = random.sample(range(0,10), 10)
+                #         mux_minibatch['input_ids'][:, idx] = mux_minibatch['input_ids'][shuffled_idx, idx]
+                outputs = model(**mux_minibatch)
+                hidden_states = outputs.hidden_states
+                all_mux_sentence_ids.append(mux_sentence_ids)
+                all_hidden_states.append(hidden_states)
+            input_ids = batch['input_ids'].to('cpu')
+            attention_mask = batch['attention_mask'].to('cpu')
+            target_hidden_states = torch.cat(all_hidden_states, dim=0).to('cpu')
+            all_mux_sentence_ids = torch.tensor(all_mux_sentence_ids)
+            features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask, 'mux_sentence_ids': all_mux_sentence_ids})
+        pro_bar.update(1)
+    return features
+
+def word_filter(eval_label, filter_list):
+    allow_token_ids = (eval_label == filter_list[0])
+    for item in filter_list:
+        allow_token_ids = allow_token_ids | (eval_label == item)
+    return allow_token_ids
+
+def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True):
+    # batch_size=32 # {roberta:32, mlp:64}
+    learning_rate=2e-5 # {roberta:1e-5 2e-5 5e-5, mlp:2e-4}
+    device='cuda'
+    epochs=30
+    topk = 1
+    inversion_model = InversionPLM(config)
+
+    inversion_model = inversion_model.to(device)
+    model = model.to(device)
+    
+    optimizer = torch.optim.AdamW(inversion_model.parameters(), lr=learning_rate)
+    
+    print('load dataloader to memory')
+    train_dataloader = dataloader2memory(train_dataloader, model, config.num_instances, config.target_layer, device)
+    eval_dataloader = dataloader2memory(eval_dataloader, model, config.num_instances, config.target_layer, device)
+    print('done')
+    
+    total_step = len(train_dataloader) * epochs
+    
+    progress_bar = tqdm(range(total_step))
+    special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+    filter_tokens = list(set(special_tokens + simple_tokens))
+    
+    completed_steps = 0
+    model_attack_acc = 0
+    hit_tokens = {}
+    mux_tokens_list = []
+    print('################# start train inversion model #################')
+    for epoch in range(epochs):
+        for step, batch in enumerate(train_dataloader):
+            batch = {key:value.to(device) for key,value in batch.items()}
+            target_hidden_states = batch['hidden_states']
+            labels = batch['input_ids']
+            labels[labels == tokenizer.pad_token_id] = -100
+            
+            attention_mask = batch['attention_mask']
+            
+            bsz, seq_len, dim = target_hidden_states.shape
+            feature = target_hidden_states
+            
+            feature = feature.to(device)
+            attention_mask = attention_mask.to(device)
+            labels = labels.to(device)
+            
+            logits, loss = inversion_model(feature, labels, attention_mask=attention_mask)
+            if use_wandb:
+                wandb.log({'loss/inversion_model_loss':loss.item()})
+
+            loss.backward()
+            optimizer.step()
+            # lr_scheduler.step()
+            optimizer.zero_grad()
+            completed_steps += 1
+            progress_bar.update(1)
+            progress_bar.set_description('inversion_model_loss:{}'.format(loss.item()))
+
+        with torch.no_grad():
+            hit_cnt = 0
+            total_cnt = 0
+            case_study_dir = f'{config.wandb_name}'
+            case_study_path = os.path.join(f'/root/mixup/mux_plms/case_study/{config.task_name}/mux_{config.num_instances}',case_study_dir)
+            if not os.path.exists(case_study_path):
+                os.makedirs(case_study_path)
+            with open(os.path.join(case_study_path, f'inversion_epoch{epoch}.txt'),'w') as f:
+                for batch in eval_dataloader:
+                    batch = {key:value.to(device) for key,value in batch.items()}
+                    # batch['output_hidden_states'] = True
+                    
+                    # outputs = model(**batch)
+                    # target_hidden_states = outputs.hidden_states[target_layer]
+                    target_hidden_states = batch['hidden_states']
+                    eval_label = batch['input_ids']
+                    attention_mask = batch['attention_mask']
+
+                    bsz, seq_len, dim = target_hidden_states.shape
+                    feature = target_hidden_states
+                    feature = feature.to(device)
+                    attention_mask = attention_mask.to(device)
+
+                    # feature = torch.cat([feature[:, 0], feature[:, 1]], dim=2)
+                    
+                    pred_logits, preds = inversion_model.predict(feature, attention_mask=attention_mask)
+
+                    valid_ids = attention_mask!=0
+                    
+                    
+                    valid_ids[word_filter(eval_label, filter_tokens)] = False
+                    eval_label = batch['input_ids']
+                    eval_label = eval_label[valid_ids] 
+                    preds = torch.topk(pred_logits, k=topk)[1]
+                    preds = preds[valid_ids]
+                    hit_cnt += (eval_label.unsqueeze(1) == preds).int().sum().item()
+                    total_cnt += eval_label.shape[0]
+                    # 进行case_study记录
+                    top10_preds = torch.topk(pred_logits, k=10)[1]
+                    for seq_idx in range(0,  batch['input_ids'].size()[0]):
+                        f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case start-----------------------------\n')
+                        # titile
+                        f.write(f"{'origin_token':<20s} | ")
+                        for mux_idx in range(config.num_instances):
+                            f.write(f"{'mux_token{mux_idx}':<20s}")
+                        f.write(" | ")
+                        for rec_idx in range(config.num_instances):
+                            f.write(f"{'recover_token{rec_idx}':<20s}")
+                        f.write('\n')
+                        # f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
+                        # f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")
+                        for word_idx in range(0, batch['input_ids'].size()[1]):
+                            if valid_ids[seq_idx][word_idx]:
+                                f.write(f"{tokenizer.decode(batch['input_ids'][seq_idx][word_idx]):<20s} | ")
+                                for mux_idx in range(config.num_instances):
+                                    mux_sentence_id = batch['mux_sentence_ids'][seq_idx][mux_idx]
+                                    f.write(f"{tokenizer.decode(batch['input_ids'][mux_sentence_id][word_idx]):<20s}")
+                                f.write(" | ")
+                                for rec_idx in range(config.num_instances):
+                                    f.write(f"{tokenizer.decode(top10_preds[seq_idx][word_idx][rec_idx]):<20s}")
+                                # if token hited in last epoch
+                                if epoch == epochs - 1: 
+                                    if batch['input_ids'][seq_idx][word_idx] == top10_preds[seq_idx][word_idx][0]:
+                                        hit_tokens[tokenizer.decode(batch['input_ids'][seq_idx][word_idx])] = hit_tokens.get(tokenizer.decode(batch['input_ids'][seq_idx][word_idx]), 0) + 1
+                                        mux_tokens = [tokenizer.decode(batch['input_ids'][batch['mux_sentence_ids'][seq_idx][mux_idx]][word_idx]) for mux_idx in range(config.num_instances)]
+                                        mux_tokens_list.append(mux_tokens)
+                                f.write("\n")
+                        f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case end-----------------------------\n')
+                        f.write('\n')
+            model_attack_acc = hit_cnt/total_cnt
+            print('attack acc:{}'.format(hit_cnt/total_cnt))
+            if use_wandb:
+                wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
+    
+    with open(os.path.join(case_study_path, 'hit_tokens_stat.txt'),'w') as f:
+        hit_tokens = sorted(hit_tokens.items(), key=lambda x: x[1], reverse=True)
+        for (key, value) in hit_tokens:
+            f.write(f'{key:<15s}: {value}\n')
+    with open(os.path.join(case_study_path, 'mux_tokens_stat.txt'),'w') as f:
+        for mux_tokens in mux_tokens_list:
+            for mux_token in mux_tokens:
+                f.write(f"{mux_token:<15s}")
+            f.write('\n')
+    with open(os.path.join(case_study_path, 'mux_tokens_conbine_stat.txt'),'w') as f:
+        mux_conbination = {}
+        for mux_tokens in mux_tokens_list:
+            conbination = tuple(set(mux_tokens))
+            mux_conbination[conbination] = mux_conbination.get(conbination, 0) + 1
+        mux_conbination = sorted(mux_conbination.items(), key=lambda x: x[1], reverse=True)
+        for (key, value) in mux_conbination:
+            f.write(f"conbination_times : {value}\t")
+            f.write(f"conbination_tokens : ")
+            for mux_token in key:
+                f.write(f"{mux_token:<15s}")
+            f.write('\n')
+    # torch.save(model, 'mux_plms/ckpts/sst2/datamux-sst2-10/inversion_model_token_shuffle.pt')
+    return model_attack_acc
 
 
 @dataclass
@@ -297,6 +522,19 @@ class ModelArguments:
         default=3,
         metadata={"help": "number of hidden layers for demuxing"},
     )
+    epsilon: Optional[float] = field(
+        default=1.0,
+        metadata={"help": "the scale for laplace noise"},
+    )
+    wandb_name: Optional[str] = field(
+        default="mux_plm_default_wandb_name",
+    )
+    use_wandb: bool = field(
+        default=False,
+    )
+    add_embedding_noise: bool = field(
+        default=False,
+    )
 
 
 def main():
@@ -450,6 +688,11 @@ def main():
     config.task_loss_coeff = model_args.task_loss_coeff
     config.learn_muxing = model_args.learn_muxing
     config.num_hidden_demux_layers = model_args.num_hidden_demux_layers
+    config.add_embedding_noise = model_args.add_embedding_noise
+    config.epsilon = model_args.epsilon
+    config.target_layer = 3
+    config.wandb_name = model_args.wandb_name
+    
     tokenizer_name_or_path = (
         model_args.tokenizer_name
         if model_args.tokenizer_name
@@ -592,8 +835,11 @@ def main():
         tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None
     )
 
+    # # Metrics
+    # metric = load_metric("seqeval")
+    
     # Metrics
-    metric = load_metric("seqeval")
+    metric = evaluate.load("seqeval")
 
     def compute_metrics(p):
         predictions, labels = p
@@ -627,7 +873,11 @@ def main():
                 "f1": results["overall_f1"],
                 "accuracy": results["overall_accuracy"],
             }
-
+    # use wandb
+    if model_args.use_wandb:
+        project_name = f'muxplm_{data_args.task_name}'
+        wandb.init(config=config, project=project_name, entity='mixup_inference', name=model_args.wandb_name, sync_tensorboard=False,
+                job_type="CleanRepo", settings=wandb.Settings(start_method='fork'))
     # Initialize our Trainer
     trainer = FinetuneTrainer(
         model=model,
@@ -729,6 +979,12 @@ def main():
         else:
             kwargs["dataset"] = data_args.dataset_name
 
+    train_dataloader = DataLoader(
+        train_dataset, shuffle=True, collate_fn=data_collator, batch_size=60, drop_last=True
+    )
+    eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=60, drop_last=True)
+    torch.cuda.empty_cache()
+    model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, model_args.use_wandb)
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)

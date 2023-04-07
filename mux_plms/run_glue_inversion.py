@@ -142,9 +142,9 @@ def word_filter(eval_label, filter_list):
 
 def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True):
     # batch_size=32 # {roberta:32, mlp:64}
-    learning_rate=1e-5 # {roberta:1e-5 2e-5 5e-5, mlp:2e-4}
+    learning_rate=2e-5 # {roberta:1e-5 2e-5 5e-5, mlp:2e-4}
     device='cuda'
-    epochs=40
+    epochs=30
     topk = 1
     inversion_model = InversionPLM(config)
 
@@ -202,7 +202,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
             hit_cnt = 0
             total_cnt = 0
             case_study_dir = f'{config.wandb_name}'
-            case_study_path = os.path.join(f'/root/mixup/mux_plms/case_study/mux_{config.num_instances}',case_study_dir)
+            case_study_path = os.path.join(f'/root/mixup/mux_plms/case_study/{config.task_name}/mux_{config.num_instances}',case_study_dir)
             if not os.path.exists(case_study_path):
                 os.makedirs(case_study_path)
             with open(os.path.join(case_study_path, f'inversion_epoch{epoch}.txt'),'w') as f:
@@ -238,12 +238,17 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                     # 进行case_study记录
                     top10_preds = torch.topk(pred_logits, k=10)[1]
                     for seq_idx in range(0,  batch['input_ids'].size()[0]):
-                        f.write(f'-----------------------------muxplm-sst2-{config.num_instances} case start-----------------------------\n')
+                        f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case start-----------------------------\n')
                         # titile
                         f.write(f"{'origin_token':<20s} | ")
-                        f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
-                        f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")
+                        for mux_idx in range(config.num_instances):
+                            f.write(f"{'mux_token{mux_idx}':<20s}")
+                        f.write(" | ")
+                        for rec_idx in range(config.num_instances):
+                            f.write(f"{'recover_token{rec_idx}':<20s}")
                         f.write('\n')
+                        # f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
+                        # f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")
                         for word_idx in range(0, batch['input_ids'].size()[1]):
                             if valid_ids[seq_idx][word_idx]:
                                 f.write(f"{tokenizer.decode(batch['input_ids'][seq_idx][word_idx]):<20s} | ")
@@ -260,7 +265,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                                         mux_tokens = [tokenizer.decode(batch['input_ids'][batch['mux_sentence_ids'][seq_idx][mux_idx]][word_idx]) for mux_idx in range(config.num_instances)]
                                         mux_tokens_list.append(mux_tokens)
                                 f.write("\n")
-                        f.write(f'-----------------------------muxplm-sst2-{config.num_instances} case end-----------------------------\n')
+                        f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case end-----------------------------\n')
                         f.write('\n')
             model_attack_acc = hit_cnt/total_cnt
             print('attack acc:{}'.format(hit_cnt/total_cnt))
@@ -704,6 +709,7 @@ def main():
     config.epsilon = model_args.epsilon
     config.target_layer = 3
     config.wandb_name = model_args.wandb_name
+    config.task_name = data_args.task_name
     
     model_path_supplied = model_args.model_name_or_path is not None
     if model_args.should_mux:

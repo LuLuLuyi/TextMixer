@@ -926,6 +926,7 @@ class MuxedBertForTokenClassification(BertPreTrainedModel):
         self.demuxing_variant = config.demuxing_variant
         self.retrieval_loss_coeff = config.retrieval_loss_coeff
         self.task_loss_coeff = config.task_loss_coeff
+        self.m = Laplace(loc=torch.tensor(0, device='cuda', dtype=float), scale=torch.tensor(1/config.epsilon, device='cuda', dtype=float))
 
         if config.demuxing_variant == "index":
             self.demultiplexer = IndexDemultiplexerTokenLevel(config)
@@ -1206,15 +1207,27 @@ class MuxedBertForTokenClassification(BertPreTrainedModel):
                 modified_seq_length,
                 embedding_dim,
             )
+            
+            
             # extract relevant instance embeddings
             instance_embed = self.instance_embedding[:num_instances, :]
             instance_embed = instance_embed.unsqueeze(1).expand(
                 num_instances, modified_seq_length, embedding_dim
             )
+            
+            # add noise for a random embedding before multiply instance_embed
+            if self.config.add_embedding_noise:
+                for modified_batch_idx in range(modified_batch_size):
+                    noise_pos = random.randint(0, num_instances-1)
+                    target_noise = self.m.sample(embedding_output[modified_batch_idx, noise_pos].shape).type_as(embedding_output[modified_batch_idx, noise_pos])
+                    embedding_output[modified_batch_idx, noise_pos] = embedding_output[modified_batch_idx, noise_pos] + target_noise
+
             embedding_output = embedding_output * instance_embed.unsqueeze(0)
 
             embedding_output = torch.mean(embedding_output, dim=1)
-
+            
+        mux_embedding = embedding_output
+        
         outputs = self.bert(
             input_ids=None,
             attention_mask=None,
@@ -1312,5 +1325,6 @@ class MuxedBertForTokenClassification(BertPreTrainedModel):
             retrieval_loss=retrieval_loss,
             retrieval_predictions=None,
             retrieval_instance_labels=None,
-            hidden_states=demuxed_sequence_output,
+            hidden_states=mux_embedding,
+            # hidden_states=demuxed_sequence_output,
         )

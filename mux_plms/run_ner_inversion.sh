@@ -106,6 +106,24 @@ while :; do
             fi
             ;;
 
+        --epsilon)
+            if [ "$2" ]; then
+                EPSILON=$2
+                shift
+            else
+                die 'ERROR: "--epsilon" requires a non-empty option argument.'
+            fi
+            ;;
+
+        --add_embedding_noise)
+            if [ "$2" ]; then
+                ADD_EMBEDDING_NOISE=$2
+                shift
+            else
+                die 'ERROR: "--add_embedding_noise" requires a non-empty option argument.'
+            fi
+            ;;
+
         --batch_size)
             if [ "$2" ]; then
                 BATCH_SIZE=$2
@@ -121,6 +139,14 @@ while :; do
                 shift
             else
                 die 'ERROR: "--task" requires a non-empty option argument.'
+            fi
+            ;;
+        --wandb_name)
+            if [ "$2" ]; then
+                WANDB_NAME=$2
+                shift
+            else
+                die 'ERROR: "--wandb_name" requires a non-empty option argument.'
             fi
             ;;
 
@@ -179,7 +205,7 @@ done
 
 BEST_METRIC="eval_f1"
 NUM_TRAIN_STEPS=20000
-NUM_EVAL_STEPS=100
+NUM_EVAL_STEPS=1000
 
 declare -A task2dataset 
 task2dataset[ner]="conll2003"
@@ -253,7 +279,7 @@ fi
 
 BATCH_SIZE=32
 BATCH_SIZE=$(($BATCH_SIZE * NUM_INSTANCES))
-
+# --dataloader_num_workers 4 \
 CMD="python run_ner_inversion.py \
 --tokenizer_name bert-base-uncased \
 --config_name ${CONFIG_NAME} \
@@ -262,11 +288,11 @@ CMD="python run_ner_inversion.py \
 --per_device_train_batch_size $BATCH_SIZE \
 --per_device_eval_batch_size $BATCH_SIZE \
 --learning_rate $LEARNING_RATE \
---output_dir $OUTPUT_DIR \
---run_name  $RUN_NAME \
+--output_dir ${OUTPUT_DIR}_${WANDB_NAME} \
+--wandb_name ${WANDB_NAME} \
+--use_wandb True \
 --logging_steps 100 \
 --dataloader_drop_last $DATALOADER_DROP_LAST \
---dataloader_num_workers 4 \
 --warmup_ratio 0.1 \
 --lr_scheduler_type linear \
 --retrieval_percentage $RETRIEVAL_PERCENTAGE \
@@ -285,7 +311,9 @@ CMD="python run_ner_inversion.py \
 --dataset_name ${DATASET_NAME} \
 --label_column_name ${LABEL_COLUMN_NAME} \
 --num_hidden_demux_layers 3 \
---save_total_limit 1"
+--save_total_limit 1 \
+--epsilon $EPSILON \
+--add_embedding_noise $ADD_EMBEDDING_NOISE"
 if [ "$DO_TRAIN" -eq 1 ]; then
         CMD="${CMD} --do_train"
 fi

@@ -242,10 +242,10 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                         # titile
                         f.write(f"{'origin_token':<20s} | ")
                         for mux_idx in range(config.num_instances):
-                            f.write(f"{'mux_token{mux_idx}':<20s}")
+                            f.write(f"{f'mux_token{mux_idx}':<20s}")
                         f.write(" | ")
                         for rec_idx in range(config.num_instances):
-                            f.write(f"{'recover_token{rec_idx}':<20s}")
+                            f.write(f"{f'recover_token{rec_idx}':<20s}")
                         f.write('\n')
                         # f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
                         # f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")

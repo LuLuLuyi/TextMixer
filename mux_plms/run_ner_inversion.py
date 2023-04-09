@@ -229,10 +229,10 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                         # titile
                         f.write(f"{'origin_token':<20s} | ")
                         for mux_idx in range(config.num_instances):
-                            f.write(f"{'mux_token{mux_idx}':<20s}")
-                        f.write(" | ")
+                            f.write(f"{f'mux_token{mux_idx}':<20s}")
+                        f.write(" | ") 
                         for rec_idx in range(config.num_instances):
-                            f.write(f"{'recover_token{rec_idx}':<20s}")
+                            f.write(f"{f'recover_token{rec_idx}':<20s}")
                         f.write('\n')
                         # f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
                         # f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")
@@ -611,12 +611,12 @@ def main():
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
-    if training_args.do_train:
-        column_names = raw_datasets["train"].column_names
-        features = raw_datasets["train"].features
-    else:
-        column_names = raw_datasets["validation"].column_names
-        features = raw_datasets["validation"].features
+    # if training_args.do_train:
+    column_names = raw_datasets["train"].column_names
+    features = raw_datasets["train"].features
+    # else:
+    #     column_names = raw_datasets["validation"].column_names
+    #     features = raw_datasets["validation"].features
 
     if data_args.text_column_name is not None:
         text_column_name = data_args.text_column_name
@@ -692,6 +692,7 @@ def main():
     config.epsilon = model_args.epsilon
     config.target_layer = 3
     config.wandb_name = model_args.wandb_name
+    config.task_name = data_args.task_name
     
     tokenizer_name_or_path = (
         model_args.tokenizer_name
@@ -785,32 +786,32 @@ def main():
         tokenized_inputs["labels"] = labels
         return tokenized_inputs
 
-    if training_args.do_train:
-        if "train" not in raw_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = raw_datasets["train"]
-        if data_args.max_train_samples is not None:
-            train_dataset = train_dataset.select(range(data_args.max_train_samples))
+    # if training_args.do_train:
+    if "train" not in raw_datasets:
+        raise ValueError("--do_train requires a train dataset")
+    train_dataset = raw_datasets["train"]
+    if data_args.max_train_samples is not None:
+        train_dataset = train_dataset.select(range(data_args.max_train_samples))
 
-        train_dataset = train_dataset.map(
-            tokenize_and_align_labels,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+    train_dataset = train_dataset.map(
+        tokenize_and_align_labels,
+        batched=True,
+        num_proc=data_args.preprocessing_num_workers,
+        load_from_cache_file=False,
+    )
 
-    if training_args.do_eval:
-        if "validation" not in raw_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation"]
-        if data_args.max_eval_samples is not None:
-            eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
-        eval_dataset = eval_dataset.map(
-            tokenize_and_align_labels,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+    # if training_args.do_eval:
+    if "validation" not in raw_datasets:
+        raise ValueError("--do_eval requires a validation dataset")
+    eval_dataset = raw_datasets["validation"]
+    if data_args.max_eval_samples is not None:
+        eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
+    eval_dataset = eval_dataset.map(
+        tokenize_and_align_labels,
+        batched=True,
+        num_proc=data_args.preprocessing_num_workers,
+        load_from_cache_file=False,
+    )
 
     if training_args.do_predict:
         if "test" not in raw_datasets:
@@ -882,8 +883,10 @@ def main():
     trainer = FinetuneTrainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
+        # train_dataset=train_dataset if training_args.do_train else None,
+        # eval_dataset=eval_dataset if training_args.do_eval else None,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,

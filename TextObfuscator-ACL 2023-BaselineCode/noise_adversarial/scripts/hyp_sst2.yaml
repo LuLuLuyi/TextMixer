@@ -1,0 +1,16 @@
+program: /root/contrastive_privacy/version0_1/train_contrastive_hyp.py
+method: grid
+metric:
+  name: accuracy
+  goal: maximize
+parameters:
+  cluster_num:
+    values: [100, 500]
+  w_noise:
+    values: [0.01, 0.05, 0.1, 0.5, 1]
+  w_cluster_away:
+    values: [0.01, 0.05, 0.1]
+  w_cluster_close:
+    values: [0.01, 0.05, 0.1, 0.5, 1]
+
+  

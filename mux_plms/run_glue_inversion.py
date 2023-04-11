@@ -55,11 +55,12 @@ from datamux_pretraining.models.finetune_trainer import FinetuneTrainer
 from datamux_pretraining.models.tokenshuffle_data_collator import tokenshuffle_data_collator
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
+from rouge_score import rouge_scorer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
-from rouge_score import rouge_scorer
+
 
 task_to_keys = {
     "cola": ("sentence", None),

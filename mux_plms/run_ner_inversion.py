@@ -52,6 +52,7 @@ from datamux_pretraining.models.multiplexing_pretraining_bert import (
 from transformers.trainer_utils import get_last_checkpoint
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
+from rouge_score import rouge_scorer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -283,6 +284,93 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     # torch.save(model, 'mux_plms/ckpts/sst2/datamux-sst2-10/inversion_model_token_shuffle.pt')
     return model_attack_acc
 
+
+def rouge(input_ids, pred_ids, tokenizer):
+    # input_ids (bsz, seq_len)
+    # pred_ids (bsz, seq_len)
+    batch_real_tokens = [tokenizer.decode(item, skip_special_tokens=True) for item in input_ids]
+    batch_pred_tokens = [tokenizer.decode(item, skip_special_tokens=True) for item in pred_ids]
+
+    scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
+    # scores = scorer.score('The quick brown fox jumps over the lazy dog',
+    #                   'The quick brown dog jumps on the log.')
+    hit_cnt = 0
+    total_cnt = 0
+    for real_tokens, pred_tokens in zip(batch_real_tokens, batch_pred_tokens):
+        rouge_score = scorer.score(real_tokens, pred_tokens)['rougeL'].fmeasure
+        hit_cnt += rouge_score
+        total_cnt += 1
+    return hit_cnt, total_cnt
+
+def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config):
+    emb = model.bert.embeddings.word_embeddings.weight
+    device = 'cuda'
+    model.eval()
+    # hit
+    top1_hit_cnt = 0
+    top5_hit_cnt = 0
+    top10_hit_cnt = 0
+    rouge_hit_cnt = 0
+    # total
+    total_cnt = 0
+    rouge_total_cnt = 0
+    for step, batch in enumerate(dataloader):
+        with torch.no_grad():
+            batch = {key:value.to(device) for key,value in batch.items()}
+            batch_size, sequence_length = batch["input_ids"].size()
+            all_predictions = []
+            all_hidden_states = []
+            for idx in range(batch_size):
+                sample_list = list(range(0,batch_size))
+                sample_list.remove(idx)
+                mux_sentence_ids = random.sample(sample_list, k=config.num_instances-1)
+                real_sentence_idx = random.randint(0, len(mux_sentence_ids))
+                mux_sentence_ids.insert(real_sentence_idx, idx)
+                
+                mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()} 
+                outputs = model(**mux_minibatch)
+                hidden_states = outputs.hidden_states
+                predictions = outputs.logits.argmax(dim=-1)
+                all_predictions.append(predictions[real_sentence_idx])
+                all_hidden_states.append(hidden_states)
+            
+        # evaluate
+        all_predictions = torch.tensor(all_predictions)
+        all_hidden_states = torch.cat(all_hidden_states, dim=0)
+        references = batch["labels"]
+        metric.add_batch(
+            predictions=all_predictions,
+            references=references,
+        )
+        
+        attention_mask = batch['attention_mask']
+        valid_ids = attention_mask!=0  
+        eval_label = batch['input_ids']
+        PAD_IDS = 0
+        CLS_IDS = 101
+        SEP_IDS = 102
+        valid_ids[(eval_label==CLS_IDS) | (eval_label==SEP_IDS) | (eval_label==PAD_IDS)] = False
+        eval_label = eval_label[valid_ids] # (samples)
+        preds_feature = all_hidden_states[valid_ids]
+        ed = torch.cdist(preds_feature, emb, p=2.0) # (samples, embeddings)
+        candidate_token_ids_top1 = torch.topk(ed, 1, largest=False)[1] # (samples, topk)
+        candidate_token_ids_top5 = torch.topk(ed, 5, largest=False)[1] # (samples, topk)
+        candidate_token_ids_top10 = torch.topk(ed, 10, largest=False)[1] # (samples, topk)
+        top1_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top1).int().sum().item()
+        top5_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top5).int().sum().item()
+        top10_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top10).int().sum().item()
+        total_cnt += eval_label.shape[0]
+        # rouge
+        r_hit_cnt, r_total_cnt = rouge(eval_label.unsqueeze(1), candidate_token_ids_top1, tokenizer)
+        rouge_hit_cnt += r_hit_cnt
+        rouge_total_cnt += r_total_cnt
+    # compute metric
+    eval_metric = metric.compute()
+    eval_metric['knn_top1'] = top1_hit_cnt/total_cnt
+    eval_metric['knn_top5'] = top5_hit_cnt/total_cnt
+    eval_metric['knn_top10'] = top10_hit_cnt/total_cnt
+    eval_metric['knn_rouge'] = rouge_hit_cnt/rouge_total_cnt
+    return eval_metric
 
 @dataclass
 class DataTrainingArguments:
@@ -987,6 +1075,7 @@ def main():
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=60, drop_last=True)
     torch.cuda.empty_cache()
+    eval_metric = evaluate_with_knn_attack(model, eval_dataloader, tokenizer, metric, config)       
     model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, model_args.use_wandb)
 
 def _mp_fn(index):

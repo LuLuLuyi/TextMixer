@@ -49,10 +49,11 @@ from transformers import (
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
 from torch.distributions.laplace import Laplace
+from rouge_score import rouge_scorer
 import wandb
 
 class InversionPLM(nn.Module):
-    def __init__(self, config, model_name_or_path='roberta-base'):
+    def __init__(self, config, model_name_or_path='bert-base-uncased'):
         super(InversionPLM, self).__init__()
         self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
         self.loss = torch.nn.CrossEntropyLoss()
@@ -81,7 +82,7 @@ def dataloader2memory_with_word_dropout(dataloader, model, nullification_rate, t
             # add word dropout
             nullify = (torch.rand_like(attention_mask.float()) > nullification_rate).long()
             attention_mask = attention_mask * nullify
-            target_hidden_states = outputs.hidden_states[target_layer].to('cpu')
+            target_hidden_states = outputs.hidden_states.to('cpu')
             features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask})
         pro_bar.update(1)
     return features
@@ -92,11 +93,11 @@ def word_filter(eval_label, filter_list):
         allow_token_ids = allow_token_ids | (eval_label == item)
     return allow_token_ids
 
-def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True):
+def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True, output_dir=None):
     batch_size=32 # {roberta:32, mlp:64}
     learning_rate=5e-5 # {roberta:5e-5, mlp:2e-4}
     device='cuda'
-    epochs=5
+    epochs=30
     topk = 1
     inversion_model = InversionPLM(config)
 
@@ -119,6 +120,10 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     
     completed_steps = 0
     model_attack_acc = 0
+    # best
+    best_top1_acc = 0
+    best_top5_acc = 0
+    best_rouge = 0
     print('################# start train inversion model #################')
     for epoch in range(epochs):
         for step, batch in enumerate(train_dataloader):
@@ -146,9 +151,14 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
             progress_bar.update(1)
             progress_bar.set_description('inversion_model_loss:{}'.format(loss.item()))
 
-        if True:
-            hit_cnt = 0
+        with torch.no_grad():
+            # hit
+            rouge_hit_cnt = 0
+            top1_hit_cnt = 0
+            top5_hit_cnt = 0
+            # total
             total_cnt = 0
+            rouge_total_cnt = 0
             for batch in eval_dataloader:
                 batch = {key:value.to(device) for key,value in batch.items()}
                 target_hidden_states = batch['hidden_states']
@@ -165,26 +175,79 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                 valid_ids[word_filter(eval_label, filter_tokens)] = False
                 eval_label = batch['input_ids']
                 eval_label = eval_label[valid_ids] 
-                preds = torch.topk(pred_logits, k=topk)[1]
-                preds = preds[valid_ids]
-                hit_cnt += (eval_label.unsqueeze(1) == preds).int().sum().item()
+                # inversion top1
+                top1_preds = torch.topk(pred_logits, k=1)[1]
+                top1_preds = top1_preds[valid_ids]
+                top1_hit_cnt += (eval_label.unsqueeze(1) == top1_preds).int().sum().item()
+                # inversion top5
+                top5_preds = torch.topk(pred_logits, k=5)[1]
+                top5_preds = top5_preds[valid_ids]
+                top5_hit_cnt += (eval_label.unsqueeze(1) == top5_preds).int().sum().item()
                 total_cnt += eval_label.shape[0]
-            model_attack_acc = hit_cnt/total_cnt
-            print('attack acc:{}'.format(hit_cnt/total_cnt))
+                 # rouge
+                r_hit_cnt, r_total_cnt = rouge(eval_label.unsqueeze(1), top1_preds, tokenizer)
+                rouge_hit_cnt += r_hit_cnt
+                rouge_total_cnt += r_total_cnt
+            # caculate attack accuracy
+            top1_model_attack_acc = top1_hit_cnt/total_cnt
+            top5_model_attack_acc = top5_hit_cnt/total_cnt
+            rouge_acc = rouge_hit_cnt / rouge_total_cnt
+            print('eval inversion top1 attack acc:{}'.format(top1_model_attack_acc))
             if use_wandb:
-                wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
+                wandb.log({'eval/inversion_model_top1_acc': top1_model_attack_acc})
+                wandb.log({'eval/inversion_model_top5_acc': top5_model_attack_acc})
+                wandb.log({'eval/inversion_model_rouge_acc': rouge_acc})
+            # record the best
+            if top1_model_attack_acc > best_top1_acc:
+                best_top1_acc = top1_model_attack_acc
+            if top5_model_attack_acc > best_top5_acc:
+                best_top5_acc = top5_model_attack_acc
+            if rouge_acc > best_rouge:
+                best_rouge = rouge_acc
+    # log the best
+    print(f'best_inversion_model_top1_acc:{best_top1_acc}')
+    print(f'best_inversion_model_top5_acc:{best_top5_acc}')
+    print(f'best_inversion_model_rouge:{best_rouge}')
+    if use_wandb:
+        wandb.log({'best/best_inversion_model_top1_acc': best_top1_acc})
+        wandb.log({'best/best_inversion_model_top5_acc': best_top5_acc})
+        wandb.log({'best/best_inversion_model_rouge_acc': best_rouge})
+    # save inversion model
+    torch.save(inversion_model, os.path.join(output_dir,'inversion_model.pt'))
     return model_attack_acc
 
+def rouge(input_ids, pred_ids, tokenizer):
+    # input_ids (bsz, seq_len)
+    # pred_ids (bsz, seq_len)
+    batch_real_tokens = [tokenizer.decode(item, skip_special_tokens=True) for item in input_ids]
+    batch_pred_tokens = [tokenizer.decode(item, skip_special_tokens=True) for item in pred_ids]
 
-
-
-def evaluate_with_knn_attack(model, dataloader, metric, accelerator, topk=5, target_layer=3):
-    emb = model.roberta.embeddings.word_embeddings.weight
-    model.eval()
-    samples_seen = 0
+    scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
+    # scores = scorer.score('The quick brown fox jumps over the lazy dog',
+    #                   'The quick brown dog jumps on the log.')
     hit_cnt = 0
     total_cnt = 0
+    for real_tokens, pred_tokens in zip(batch_real_tokens, batch_pred_tokens):
+        rouge_score = scorer.score(real_tokens, pred_tokens)['rougeL'].fmeasure
+        hit_cnt += rouge_score
+        total_cnt += 1
+    return hit_cnt, total_cnt
+
+def evaluate_with_knn_attack(model, tokenizer, dataloader, metric, accelerator, nullification_rate=-1, target_layer=3):
+    emb = model.bert.embeddings.word_embeddings.weight
+    model.eval()
+    samples_seen = 0
+    # hit
+    top1_hit_cnt = 0
+    top5_hit_cnt = 0
+    top10_hit_cnt = 0
+    rouge_hit_cnt = 0
+    # total
+    total_cnt = 0
+    rouge_total_cnt = 0
     for step, batch in enumerate(dataloader):
+        nullify = (torch.rand_like(batch["attention_mask"].float()) > nullification_rate).long()
+        batch["attention_mask"] = batch["attention_mask"] * nullify
         batch['output_hidden_states'] = True
         with torch.no_grad():
             outputs = model(**batch)
@@ -206,23 +269,35 @@ def evaluate_with_knn_attack(model, dataloader, metric, accelerator, topk=5, tar
         
         attention_mask = batch['attention_mask']
         valid_ids = attention_mask!=0
-        
-        # valid_ids[eval_label==SEP_IDS] = False
-            
         eval_label = batch['input_ids']
-        CLS_IDS = 0
-        SEP_IDS = 3
-        valid_ids[(eval_label==CLS_IDS) | (eval_label==SEP_IDS)] = False
+        PAD_IDS = 0
+        CLS_IDS = 101
+        SEP_IDS = 102
+        special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
+        simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+        filter_tokens = list(set(special_tokens + simple_tokens))
+        valid_ids[word_filter(eval_label, filter_tokens)] = False
+        # valid_ids[(eval_label==CLS_IDS) | (eval_label==SEP_IDS) | (eval_label==PAD_IDS)] = False
         eval_label = eval_label[valid_ids] # (samples)
-        preds_feature = outputs.hidden_states[target_layer][valid_ids]
+        preds_feature = outputs.hidden_states[valid_ids]
         ed = torch.cdist(preds_feature, emb, p=2.0) # (samples, embeddings)
-        candidate_token_ids_topk = torch.topk(ed, topk, largest=False)[1] # (samples, topk)
-        
-        hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_topk).int().sum().item()
+        candidate_token_ids_top1 = torch.topk(ed, 1, largest=False)[1] # (samples, topk)
+        candidate_token_ids_top5 = torch.topk(ed, 5, largest=False)[1] # (samples, topk)
+        candidate_token_ids_top10 = torch.topk(ed, 10, largest=False)[1] # (samples, topk)
+        top1_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top1).int().sum().item()
+        top5_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top5).int().sum().item()
+        top10_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top10).int().sum().item()
         total_cnt += eval_label.shape[0]
+        # rouge
+        r_hit_cnt, r_total_cnt = rouge(eval_label.unsqueeze(1), candidate_token_ids_top1, tokenizer)
+        rouge_hit_cnt += r_hit_cnt
+        rouge_total_cnt += r_total_cnt
         
     eval_metric = metric.compute()
-    eval_metric['knn_top{}'.format(topk)] = hit_cnt/total_cnt
+    eval_metric['knn_top1'] = top1_hit_cnt/total_cnt
+    eval_metric['knn_top5'] = top5_hit_cnt/total_cnt
+    eval_metric['knn_top10'] = top10_hit_cnt/total_cnt
+    eval_metric['knn_rouge'] = rouge_hit_cnt/rouge_total_cnt
     return eval_metric
 
 logger = get_logger(__name__)
@@ -274,7 +349,7 @@ def parse_args():
     parser.add_argument(
         "--model_name_or_path",
         type=str,
-        default='roberta-base',
+        default='bert-base-uncased',
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
@@ -525,8 +600,8 @@ def main():
     config.add_noise = args.add_noise
     config.nullification_rate = args.nullification_rate
 
-    from models.modeling_roberta_noise import RobertaForSequenceClassification
-    model = RobertaForSequenceClassification.from_pretrained(
+    from models.modeling_bert_embedding_noise import BertForSequenceClassification
+    model = BertForSequenceClassification.from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
         config=config,
@@ -709,7 +784,12 @@ def main():
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
     starting_epoch = 0
-    knn_topk=10
+    # best knn record
+    best_knn_top1 = 0
+    best_knn_top5 = 0
+    best_knn_top10 = 0
+    best_knn_rouge = 0
+    best_task_accuracy = 0
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
@@ -731,10 +811,9 @@ def main():
             resume_step = int(training_difference.replace("step_", ""))
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
-    total_step = 0
     
     if args.use_wandb:
-        project_name = f'privacy_v2_noise_{args.task_name}'
+        project_name = f'dpnr_{args.task_name}'
         wandb.init(config=config, project=project_name, entity='privacy_cluster', name=args.wandb_name, sync_tensorboard=False,
                 job_type="CleanRepo")
     
@@ -778,14 +857,23 @@ def main():
 
             if completed_steps >= args.max_train_steps:
                 break
-        
-        eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, target_layer=args.target_layer, topk=knn_topk)
-        
+        eval_metric = evaluate_with_knn_attack(model, tokenizer, eval_dataloader, metric, accelerator, args.nullification_rate, target_layer=args.target_layer)
+        # save the best knn eval result
+        if eval_metric['knn_top1'] > best_knn_top1:
+            best_knn_top1 = eval_metric['knn_top1']
+        if eval_metric['knn_top5'] > best_knn_top5:
+            best_knn_top5 = eval_metric['knn_top5']
+        if eval_metric['knn_top10'] > best_knn_top10:
+            best_knn_top10 = eval_metric['knn_top10']
+        if eval_metric['knn_rouge'] > best_knn_rouge:
+            best_knn_rouge = eval_metric['knn_rouge']
+        if eval_metric['accuracy'] > best_task_accuracy:
+            best_task_accuracy = eval_metric['accuracy']
+
         logger.info(f"epoch {epoch}: {eval_metric}")
         progress_bar.set_description('acc:{:.2}'.format(eval_metric['accuracy']))
         
         if args.use_wandb:
-            # knn_name = 'knn_top{}'.format(knn_topk)
             for key,value in eval_metric.items():
                 wandb.log({f'metric/{key}':value}, step=completed_steps)
 
@@ -818,33 +906,34 @@ def main():
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
     
-    # wandb.finish()
     
     if args.with_tracking:
         accelerator.end_training()
-
-    model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=args.use_wandb)
-    if model_attack_acc < 0.2 :
+    # save model
+    if args.output_dir is not None:
         unwrapped_model = accelerator.unwrap_model(model)
         unwrapped_model.save_pretrained(
             args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
         )
-        if accelerator.is_main_process:
-            tokenizer.save_pretrained(args.output_dir)
-    # if args.output_dir is not None:
-    #     accelerator.wait_for_everyone()
-    #     unwrapped_model = accelerator.unwrap_model(model)
-    #     unwrapped_model.save_pretrained(
-    #         args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-    #     )
-    #     if accelerator.is_main_process:
-    #         tokenizer.save_pretrained(args.output_dir)
-            # if args.push_to_hub:
-            #     repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
-
+        tokenizer.save_pretrained(args.output_dir)
+    # save train result
     if args.output_dir is not None:
+        all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-            json.dump({"eval_accuracy": eval_metric["accuracy"]}, f)
+            json.dump(all_results, f)
+    # log the best knn result
+    if args.use_wandb:
+        wandb.log({'best/best_knn_top1_acc': best_knn_top1})
+        wandb.log({'best/best_knn_top5_acc': best_knn_top5})
+        wandb.log({'best/best_knn_top10_acc': best_knn_top10})
+        wandb.log({'best/best_knn_rouge_acc': best_knn_rouge})
+        wandb.log({'best/best_task_accuracy': best_task_accuracy})
+    # empty cache
+    torch.cuda.empty_cache()
+    # train inversion model
+    model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=args.use_wandb, output_dir=args.output_dir)
+
+    
     wandb.finish()
     
    

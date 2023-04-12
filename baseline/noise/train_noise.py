@@ -94,11 +94,9 @@ def word_filter(eval_label, filter_list):
     return allow_token_ids
 
 def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True, output_dir=None):
-    batch_size=32 # {roberta:32, mlp:64}
-    learning_rate=5e-5 # {roberta:5e-5, mlp:2e-4}
-    device='cuda'
+    learning_rate=2e-5 # {roberta:5e-5, mlp:2e-4}
     epochs=30
-    topk = 1
+    device='cuda'
     inversion_model = InversionPLM(config)
 
     inversion_model = inversion_model.to(device)
@@ -469,6 +467,21 @@ def parse_args():
         type=float,
         help="nullification rate",
     )
+    parser.add_argument(
+        "--train_task_model",
+        action="store_true",
+        help="Whether to train task model from scratch.",
+    )
+    parser.add_argument(
+        "--eval_task_model",
+        action="store_true",
+        help="Whether to eval task model from scratch.",
+    )
+    parser.add_argument(
+        "--train_inversion_model",
+        action="store_true",
+        help="Whether to train inversion model.",
+    )
     args = parser.parse_args()
 
     # Sanity checks
@@ -664,12 +677,12 @@ def main():
         result = tokenizer(*texts, padding=padding, max_length=args.max_length, truncation=True)
 
         if "label" in examples:
-            if label_to_id is not None:
-                # Map labels to IDs (not necessary for GLUE tasks)
-                result["labels"] = [label_to_id[l] for l in examples["label"]]
-            else:
-                # In all cases, rename the column to labels because the model will expect that.
-                result["labels"] = examples["label"]
+            # if label_to_id is not None:
+            #     # Map labels to IDs (not necessary for GLUE tasks)
+            #     result["labels"] = [label_to_id[l] for l in examples["label"]]
+            # else:
+            # In all cases, rename the column to labels because the model will expect that.
+            result["labels"] = examples["label"]
         return result
 
     with accelerator.main_process_first():
@@ -769,169 +782,174 @@ def main():
     else:
         metric = evaluate.load("accuracy")
     
-    
-    # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-    completed_steps = 0
-    starting_epoch = 0
-    # best knn record
-    best_knn_top1 = 0
-    best_knn_top5 = 0
-    best_knn_top10 = 0
-    best_knn_rouge = 0
-    best_task_accuracy = 0
-    # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
-            accelerator.load_state(args.resume_from_checkpoint)
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
-            dirs.sort(key=os.path.getctime)
-            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
-
-        if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
-            resume_step = None
-        else:
-            resume_step = int(training_difference.replace("step_", ""))
-            starting_epoch = resume_step // len(train_dataloader)
-            resume_step -= starting_epoch * len(train_dataloader)
-    
     if args.use_wandb:
-        project_name = f'dpnr_{args.task_name}'
-        wandb.init(config=config, project=project_name, entity='privacy_cluster', name=args.wandb_name, sync_tensorboard=False,
-                job_type="CleanRepo")
-    
-    
-    
-    for epoch in range(starting_epoch, args.num_train_epochs):
-        model.train()
-        # if args.with_tracking:
-        total_loss = 0
-        for step, batch in enumerate(train_dataloader):
-            # We need to skip steps until we reach the resumed step
-            if args.resume_from_checkpoint and epoch == starting_epoch:
-                if resume_step is not None and step < resume_step:
-                    completed_steps += 1
-                    continue
-            nullify = (torch.rand_like(batch["attention_mask"].float()) > args.nullification_rate).long()
-            batch["attention_mask"] = batch["attention_mask"] * nullify
-            outputs = model(**batch)
-            loss = outputs.loss
-            if args.use_wandb:
-                wandb.log({'loss/task_loss':loss.item()}, step=completed_steps)       
-            total_loss += loss.detach().float()
-            loss = loss / args.gradient_accumulation_steps
-            progress_bar.set_description('loss:{:.5}'.format(total_loss/(step+1)))
+            project_name = f'dpnr_{args.task_name}'
+            wandb.init(config=config, project=project_name, entity='privacy_cluster', name=args.wandb_name, sync_tensorboard=False,
+                    job_type="CleanRepo")
+            
+    if args.train_task_model:
+        # Train!
+        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
-            accelerator.backward(loss)
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=20, norm_type=2)
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-                completed_steps += 1
+        logger.info("***** Running training *****")
+        logger.info(f"  Num examples = {len(train_dataset)}")
+        logger.info(f"  Num Epochs = {args.num_train_epochs}")
+        logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
+        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        logger.info(f"  Total optimization steps = {args.max_train_steps}")
+        # Only show the progress bar once on each machine.
+        progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+        completed_steps = 0
+        starting_epoch = 0
+        # best knn record
+        best_knn_top1 = 0
+        best_knn_top5 = 0
+        best_knn_top10 = 0
+        best_knn_rouge = 0
+        best_task_accuracy = 0
+        # Potentially load in the weights and states from a previous save
+        if args.resume_from_checkpoint:
+            if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
+                accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
+                accelerator.load_state(args.resume_from_checkpoint)
+                path = os.path.basename(args.resume_from_checkpoint)
+            else:
+                # Get the most recent checkpoint
+                dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
+                dirs.sort(key=os.path.getctime)
+                path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
+            # Extract `epoch_{i}` or `step_{i}`
+            training_difference = os.path.splitext(path)[0]
 
-            if isinstance(checkpointing_steps, int):
-                if completed_steps % checkpointing_steps == 0:
-                    output_dir = f"step_{completed_steps }"
-                    if args.output_dir is not None:
-                        output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(output_dir)
-
-            if completed_steps >= args.max_train_steps:
-                break
-        eval_metric = evaluate_with_knn_attack(model, tokenizer, eval_dataloader, metric, accelerator, args.nullification_rate, target_layer=args.target_layer)
-        # save the best knn eval result
-        if eval_metric['knn_top1'] > best_knn_top1:
-            best_knn_top1 = eval_metric['knn_top1']
-        if eval_metric['knn_top5'] > best_knn_top5:
-            best_knn_top5 = eval_metric['knn_top5']
-        if eval_metric['knn_top10'] > best_knn_top10:
-            best_knn_top10 = eval_metric['knn_top10']
-        if eval_metric['knn_rouge'] > best_knn_rouge:
-            best_knn_rouge = eval_metric['knn_rouge']
-        if eval_metric['accuracy'] > best_task_accuracy:
-            best_task_accuracy = eval_metric['accuracy']
-
-        logger.info(f"epoch {epoch}: {eval_metric}")
-        progress_bar.set_description('acc:{:.2}'.format(eval_metric['accuracy']))
+            if "epoch" in training_difference:
+                starting_epoch = int(training_difference.replace("epoch_", "")) + 1
+                resume_step = None
+            else:
+                resume_step = int(training_difference.replace("step_", ""))
+                starting_epoch = resume_step // len(train_dataloader)
+                resume_step -= starting_epoch * len(train_dataloader)
         
-        if args.use_wandb:
-            for key,value in eval_metric.items():
-                wandb.log({f'metric/{key}':value}, step=completed_steps)
+        
+        for epoch in range(starting_epoch, args.num_train_epochs):
+            model.train()
+            # if args.with_tracking:
+            total_loss = 0
+            for step, batch in enumerate(train_dataloader):
+                # We need to skip steps until we reach the resumed step
+                if args.resume_from_checkpoint and epoch == starting_epoch:
+                    if resume_step is not None and step < resume_step:
+                        completed_steps += 1
+                        continue
+                nullify = (torch.rand_like(batch["attention_mask"].float()) > args.nullification_rate).long()
+                batch["attention_mask"] = batch["attention_mask"] * nullify
+                outputs = model(**batch)
+                loss = outputs.loss
+                if args.use_wandb:
+                    wandb.log({'loss/task_loss':loss.item()}, step=completed_steps)       
+                total_loss += loss.detach().float()
+                loss = loss / args.gradient_accumulation_steps
+                progress_bar.set_description('loss:{:.5}'.format(total_loss/(step+1)))
 
+                accelerator.backward(loss)
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=20, norm_type=2)
+                if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+                    progress_bar.update(1)
+                    completed_steps += 1
+
+                if isinstance(checkpointing_steps, int):
+                    if completed_steps % checkpointing_steps == 0:
+                        output_dir = f"step_{completed_steps }"
+                        if args.output_dir is not None:
+                            output_dir = os.path.join(args.output_dir, output_dir)
+                        accelerator.save_state(output_dir)
+
+                if completed_steps >= args.max_train_steps:
+                    break
+            eval_metric = evaluate_with_knn_attack(model, tokenizer, eval_dataloader, metric, accelerator, args.nullification_rate, target_layer=args.target_layer)
+            # save the best knn eval result
+            if eval_metric['knn_top1'] > best_knn_top1:
+                best_knn_top1 = eval_metric['knn_top1']
+            if eval_metric['knn_top5'] > best_knn_top5:
+                best_knn_top5 = eval_metric['knn_top5']
+            if eval_metric['knn_top10'] > best_knn_top10:
+                best_knn_top10 = eval_metric['knn_top10']
+            if eval_metric['knn_rouge'] > best_knn_rouge:
+                best_knn_rouge = eval_metric['knn_rouge']
+            if eval_metric['accuracy'] > best_task_accuracy:
+                best_task_accuracy = eval_metric['accuracy']
+
+            logger.info(f"epoch {epoch}: {eval_metric}")
+            progress_bar.set_description('acc:{:.2}'.format(eval_metric['accuracy']))
+            
+            if args.use_wandb:
+                for key,value in eval_metric.items():
+                    wandb.log({f'metric/{key}':value}, step=completed_steps)
+
+            if args.with_tracking:
+                accelerator.log(
+                    {
+                        "accuracy" if args.task_name is not None else "glue": eval_metric,
+                        "train_loss": total_loss.item() / len(train_dataloader),
+                        "epoch": epoch,
+                        "step": completed_steps,
+                    },
+                    step=completed_steps,
+                )
+
+            if args.push_to_hub and epoch < args.num_train_epochs - 1:
+                accelerator.wait_for_everyone()
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(
+                    args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+                )
+                if accelerator.is_main_process:
+                    tokenizer.save_pretrained(args.output_dir)
+                    repo.push_to_hub(
+                        commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
+                    )
+
+            if args.checkpointing_steps == "epoch":
+                output_dir = f"epoch_{epoch}"
+                if args.output_dir is not None:
+                    output_dir = os.path.join(args.output_dir, output_dir)
+                accelerator.save_state(output_dir)
+        
+        
         if args.with_tracking:
-            accelerator.log(
-                {
-                    "accuracy" if args.task_name is not None else "glue": eval_metric,
-                    "train_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                    "step": completed_steps,
-                },
-                step=completed_steps,
-            )
-
-        if args.push_to_hub and epoch < args.num_train_epochs - 1:
-            accelerator.wait_for_everyone()
+            accelerator.end_training()
+        # save model
+        if args.output_dir is not None:
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.save_pretrained(
                 args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
             )
-            if accelerator.is_main_process:
-                tokenizer.save_pretrained(args.output_dir)
-                repo.push_to_hub(
-                    commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
-                )
-
-        if args.checkpointing_steps == "epoch":
-            output_dir = f"epoch_{epoch}"
-            if args.output_dir is not None:
-                output_dir = os.path.join(args.output_dir, output_dir)
-            accelerator.save_state(output_dir)
-    
-    
-    if args.with_tracking:
-        accelerator.end_training()
-    # save model
-    if args.output_dir is not None:
-        unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(
-            args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-        )
-        tokenizer.save_pretrained(args.output_dir)
-    # save train result
-    if args.output_dir is not None:
-        all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
-        with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-            json.dump(all_results, f)
-    # log the best knn result
-    if args.use_wandb:
-        wandb.log({'best/best_knn_top1_acc': best_knn_top1})
-        wandb.log({'best/best_knn_top5_acc': best_knn_top5})
-        wandb.log({'best/best_knn_top10_acc': best_knn_top10})
-        wandb.log({'best/best_knn_rouge_acc': best_knn_rouge})
-        wandb.log({'best/best_task_accuracy': best_task_accuracy})
+            tokenizer.save_pretrained(args.output_dir)
+        # save train result
+        if args.output_dir is not None:
+            all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
+            with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
+                json.dump(all_results, f)
+        # log the best knn result
+        if args.use_wandb:
+            wandb.log({'best/best_knn_top1_acc': best_knn_top1})
+            wandb.log({'best/best_knn_top5_acc': best_knn_top5})
+            wandb.log({'best/best_knn_top10_acc': best_knn_top10})
+            wandb.log({'best/best_knn_rouge_acc': best_knn_rouge})
+            wandb.log({'best/best_task_accuracy': best_task_accuracy})
+    if args.eval_task_model:
+        eval_metric = evaluate_with_knn_attack(model, tokenizer, eval_dataloader, metric, accelerator, args.nullification_rate, target_layer=args.target_layer)
+        if args.use_wandb:
+            for key,value in eval_metric.items():
+                wandb.log({f'metric/{key}':value})
     # empty cache
     torch.cuda.empty_cache()
     # train inversion model
-    model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=args.use_wandb, output_dir=args.output_dir)
+    if args.train_inversion_model:
+        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=args.use_wandb, output_dir=args.output_dir)
 
     
     wandb.finish()

@@ -1,10 +1,10 @@
 GPU=7
-# MODEL=bert-base-uncased
-MODEL=/root/mixup/baseline/noise/ckpts/sst2/epsilon1_nu-1
+MODEL=bert-base-uncased
+# MODEL=/root/mixup/baseline/noise/ckpts/sst2/epsilon1_nu-1
 
-for EPSILON in 1   # {0.05, 0.1, 0.5, 1, 5}
+for EPSILON in 0.1 0.5 1 2 5   # {0.05, 0.1, 0.5, 1, 5}
 do
-for NU in -1 # {-1, 0.1, 0.3, 0.5, 0.8}
+for NU in 0.3 # {-1, 0.1, 0.3, 0.5, 0.8}
 do
 for TASK_NAME in sst2
 do
@@ -24,6 +24,7 @@ CUDA_VISIBLE_DEVICES=$GPU python train_noise.py \
   --per_device_train_batch_size 32 \
   --learning_rate $LR \
   --nullification_rate $NU \
+  --train_task_model \
   --train_inversion_model \
   --wandb_name $WANDB_NAME
 done

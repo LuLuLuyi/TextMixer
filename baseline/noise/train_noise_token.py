@@ -57,6 +57,7 @@ import wandb
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
 from torch.distributions.laplace import Laplace
+from rouge_score import rouge_scorer
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -70,7 +71,7 @@ MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 class InversionPLM(nn.Module):
-    def __init__(self, config, model_name_or_path='roberta-base'):
+    def __init__(self, config, model_name_or_path='bert-base-uncased'):
         super(InversionPLM, self).__init__()
         self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
         self.loss = torch.nn.CrossEntropyLoss()
@@ -84,7 +85,6 @@ class InversionPLM(nn.Module):
         logits = outputs.logits
         pred = torch.argmax(F.softmax(logits,dim=-1), dim=2)
         return logits, pred
-    
 
 def dataloader2memory_with_word_dropout(dataloader, model, nullification_rate, target_layer=3, device='cuda'):
     features = []
@@ -100,7 +100,7 @@ def dataloader2memory_with_word_dropout(dataloader, model, nullification_rate, t
             # add word dropout
             nullify = (torch.rand_like(attention_mask.float()) > nullification_rate).long()
             attention_mask = attention_mask * nullify
-            target_hidden_states = outputs.hidden_states[target_layer].to('cpu')
+            target_hidden_states = outputs.hidden_states.to('cpu')
             features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask})
         pro_bar.update(1)
     return features
@@ -111,12 +111,10 @@ def word_filter(eval_label, filter_list):
         allow_token_ids = allow_token_ids | (eval_label == item)
     return allow_token_ids
 
-def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True):
-    batch_size=32 # {roberta:32, mlp:64}
+def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True, output_dir=None):
     learning_rate=5e-5 # {roberta:5e-5, mlp:2e-4}
+    epochs=20
     device='cuda'
-    epochs=5
-    topk = 1
     inversion_model = InversionPLM(config)
 
     inversion_model = inversion_model.to(device)
@@ -138,6 +136,10 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     
     completed_steps = 0
     model_attack_acc = 0
+    # best
+    best_top1_acc = 0
+    best_top5_acc = 0
+    best_rouge = 0
     print('################# start train inversion model #################')
     for epoch in range(epochs):
         for step, batch in enumerate(train_dataloader):
@@ -165,9 +167,14 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
             progress_bar.update(1)
             progress_bar.set_description('inversion_model_loss:{}'.format(loss.item()))
 
-        if True:
-            hit_cnt = 0
+        with torch.no_grad():
+            # hit
+            rouge_hit_cnt = 0
+            top1_hit_cnt = 0
+            top5_hit_cnt = 0
+            # total
             total_cnt = 0
+            rouge_total_cnt = 0
             for batch in eval_dataloader:
                 batch = {key:value.to(device) for key,value in batch.items()}
                 target_hidden_states = batch['hidden_states']
@@ -184,15 +191,63 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                 valid_ids[word_filter(eval_label, filter_tokens)] = False
                 eval_label = batch['input_ids']
                 eval_label = eval_label[valid_ids] 
-                preds = torch.topk(pred_logits, k=topk)[1]
-                preds = preds[valid_ids]
-                hit_cnt += (eval_label.unsqueeze(1) == preds).int().sum().item()
+                # inversion top1
+                top1_preds = torch.topk(pred_logits, k=1)[1]
+                top1_preds = top1_preds[valid_ids]
+                top1_hit_cnt += (eval_label.unsqueeze(1) == top1_preds).int().sum().item()
+                # inversion top5
+                top5_preds = torch.topk(pred_logits, k=5)[1]
+                top5_preds = top5_preds[valid_ids]
+                top5_hit_cnt += (eval_label.unsqueeze(1) == top5_preds).int().sum().item()
                 total_cnt += eval_label.shape[0]
-            model_attack_acc = hit_cnt/total_cnt
-            print('attack acc:{}'.format(hit_cnt/total_cnt))
+                 # rouge
+                r_hit_cnt, r_total_cnt = rouge(eval_label.unsqueeze(1), top1_preds, tokenizer)
+                rouge_hit_cnt += r_hit_cnt
+                rouge_total_cnt += r_total_cnt
+            # caculate attack accuracy
+            top1_model_attack_acc = top1_hit_cnt/total_cnt
+            top5_model_attack_acc = top5_hit_cnt/total_cnt
+            rouge_acc = rouge_hit_cnt / rouge_total_cnt
+            print('eval inversion top1 attack acc:{}'.format(top1_model_attack_acc))
             if use_wandb:
-                wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
+                wandb.log({'eval/inversion_model_top1_acc': top1_model_attack_acc})
+                wandb.log({'eval/inversion_model_top5_acc': top5_model_attack_acc})
+                wandb.log({'eval/inversion_model_rouge_acc': rouge_acc})
+            # record the best
+            if top1_model_attack_acc > best_top1_acc:
+                best_top1_acc = top1_model_attack_acc
+            if top5_model_attack_acc > best_top5_acc:
+                best_top5_acc = top5_model_attack_acc
+            if rouge_acc > best_rouge:
+                best_rouge = rouge_acc
+    # log the best
+    print(f'best_inversion_model_top1_acc:{best_top1_acc}')
+    print(f'best_inversion_model_top5_acc:{best_top5_acc}')
+    print(f'best_inversion_model_rouge:{best_rouge}')
+    if use_wandb:
+        wandb.log({'best/best_inversion_model_top1_acc': best_top1_acc})
+        wandb.log({'best/best_inversion_model_top5_acc': best_top5_acc})
+        wandb.log({'best/best_inversion_model_rouge_acc': best_rouge})
+    # save inversion model
+    torch.save(inversion_model, os.path.join(output_dir,'inversion_model.pt'))
     return model_attack_acc
+
+def rouge(input_ids, pred_ids, tokenizer):
+    # input_ids (bsz, seq_len)
+    # pred_ids (bsz, seq_len)
+    batch_real_tokens = [tokenizer.decode(item, skip_special_tokens=True) for item in input_ids]
+    batch_pred_tokens = [tokenizer.decode(item, skip_special_tokens=True) for item in pred_ids]
+
+    scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
+    # scores = scorer.score('The quick brown fox jumps over the lazy dog',
+    #                   'The quick brown dog jumps on the log.')
+    hit_cnt = 0
+    total_cnt = 0
+    for real_tokens, pred_tokens in zip(batch_real_tokens, batch_pred_tokens):
+        rouge_score = scorer.score(real_tokens, pred_tokens)['rougeL'].fmeasure
+        hit_cnt += rouge_score
+        total_cnt += 1
+    return hit_cnt, total_cnt
 
 def compute_metrics(metric, return_entity_level_metrics=False):
         results = metric.compute()
@@ -234,15 +289,24 @@ def get_labels(predictions, references, label_list):
         ]
         return true_predictions, true_labels
 
-def evaluate_with_knn_attack(model, dataloader, metric, accelerator, tokenizer, label_list, topk=5, target_layer=3, pad_to_max_length=True):
-    emb = model.roberta.embeddings.word_embeddings.weight
+def evaluate_with_knn_attack(model, dataloader, metric, accelerator, tokenizer, label_list, nullification_rate=-1, target_layer=3, pad_to_max_length=True):
+    emb = model.bert.embeddings.word_embeddings.weight
     model.eval()
     samples_seen = 0
-    hit_cnt = 0
+    # hit
+    top1_hit_cnt = 0
+    top5_hit_cnt = 0
+    top10_hit_cnt = 0
+    rouge_hit_cnt = 0
+    # total
     total_cnt = 0
+    rouge_total_cnt = 0
+    # filter special tokens
     special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+    filter_tokens = list(set(special_tokens + simple_tokens))
     for step, batch in enumerate(dataloader):
-        nullify = (torch.rand_like(batch["attention_mask"].float()) > 0.1).long()
+        nullify = (torch.rand_like(batch["attention_mask"].float()) > nullification_rate).long()
         batch["attention_mask"] = batch["attention_mask"] * nullify
         batch['output_hidden_states'] = True
         with torch.no_grad():
@@ -268,20 +332,29 @@ def evaluate_with_knn_attack(model, dataloader, metric, accelerator, tokenizer, 
         )  
 
         attention_mask = batch['attention_mask']
-        valid_ids = attention_mask!=0            
+        valid_ids = attention_mask!=0
         eval_label = batch['input_ids']
-        CLS_IDS = 0
-        SEP_IDS = 3
-        valid_ids[(eval_label==CLS_IDS) | (eval_label==SEP_IDS)] = False
+        valid_ids[word_filter(eval_label, filter_tokens)] = False
         eval_label = eval_label[valid_ids] # (samples)
-        preds_feature = outputs.hidden_states[target_layer][valid_ids]
+        preds_feature = outputs.hidden_states[valid_ids]
         ed = torch.cdist(preds_feature, emb, p=2.0) # (samples, embeddings)
-        candidate_token_ids_topk = torch.topk(ed, topk, largest=False)[1] # (samples, topk)
-        
-        hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_topk).int().sum().item()
+        candidate_token_ids_top1 = torch.topk(ed, 1, largest=False)[1] # (samples, topk)
+        candidate_token_ids_top5 = torch.topk(ed, 5, largest=False)[1] # (samples, topk)
+        candidate_token_ids_top10 = torch.topk(ed, 10, largest=False)[1] # (samples, topk)
+        top1_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top1).int().sum().item()
+        top5_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top5).int().sum().item()
+        top10_hit_cnt += (eval_label.unsqueeze(1) == candidate_token_ids_top10).int().sum().item()
         total_cnt += eval_label.shape[0]
+        # rouge
+        r_hit_cnt, r_total_cnt = rouge(eval_label.unsqueeze(1), candidate_token_ids_top1, tokenizer)
+        rouge_hit_cnt += r_hit_cnt
+        rouge_total_cnt += r_total_cnt
+        
     eval_metric = compute_metrics(metric)
-    eval_metric['knn_top{}'.format(topk)] = hit_cnt/total_cnt
+    eval_metric['knn_top1'] = top1_hit_cnt/total_cnt
+    eval_metric['knn_top5'] = top5_hit_cnt/total_cnt
+    eval_metric['knn_top10'] = top10_hit_cnt/total_cnt
+    eval_metric['knn_rouge'] = rouge_hit_cnt/rouge_total_cnt
     return eval_metric
 
 def parse_args():
@@ -335,7 +408,7 @@ def parse_args():
     parser.add_argument(
         "--model_name_or_path",
         type=str,
-        default='roberta-base',
+        default='bert-base-uncased',
         help="Path to pretrained model or model identifier from huggingface.co/models.",
         required=False,
     )
@@ -490,6 +563,21 @@ def parse_args():
         default=-1,
         type=float,
         help="nullification rate",
+    )
+    parser.add_argument(
+        "--train_task_model",
+        action="store_true",
+        help="Whether to train task model from scratch.",
+    )
+    parser.add_argument(
+        "--eval_task_model",
+        action="store_true",
+        help="Whether to eval task model from scratch.",
+    )
+    parser.add_argument(
+        "--train_inversion_model",
+        action="store_true",
+        help="Whether to train inversion model.",
     )
     args = parser.parse_args()
 
@@ -702,15 +790,10 @@ def main():
     config.epsilon = args.epsilon
     config.add_noise = args.add_noise
     config.nullification_rate = args.nullification_rate
-    knn_topk = 10
-    
-    if args.use_wandb:
-        project_name = f'privacy_v2_noise_ontonotes'
-        wandb.init(config=config, project=project_name, entity='privacy_cluster', name=args.wandb_name)
     
 
-    from models.modeling_roberta_noise import RobertaForTokenClassification
-    model = RobertaForTokenClassification.from_pretrained(
+    from models.modeling_bert_embedding_noise import BertForTokenClassification
+    model = BertForTokenClassification.from_pretrained(
         args.model_name_or_path,
         from_tf=bool(".ckpt" in args.model_name_or_path),
         config=config,
@@ -934,159 +1017,186 @@ def main():
                 "f1": results["overall_f1"],
                 "accuracy": results["overall_accuracy"],
             }
+            
+    if args.use_wandb:
+        project_name = f'dpnr_{args.task_name}'
+        wandb.init(config=config, project=project_name, entity='privacy_cluster', name=args.wandb_name)
+    if args.train_task_model:
+        # Train!
+        total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
-    # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+        logger.info("***** Running training *****")
+        logger.info(f"  Num examples = {len(train_dataset)}")
+        logger.info(f"  Num Epochs = {args.num_train_epochs}")
+        logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
+        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        logger.info(f"  Total optimization steps = {args.max_train_steps}")
+        # Only show the progress bar once on each machine.
+        progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+        completed_steps = 0
+        starting_epoch = 0
+        # best knn record
+        best_knn_top1 = 0
+        best_knn_top5 = 0
+        best_knn_top10 = 0
+        best_knn_rouge = 0
+        best_task_f1 = 0
+        # Potentially load in the weights and states from a previous save
+        if args.resume_from_checkpoint:
+            if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
+                accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
+                accelerator.load_state(args.resume_from_checkpoint)
+                path = os.path.basename(args.resume_from_checkpoint)
+            else:
+                # Get the most recent checkpoint
+                dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
+                dirs.sort(key=os.path.getctime)
+                path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
+            # Extract `epoch_{i}` or `step_{i}`
+            training_difference = os.path.splitext(path)[0]
 
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
-    completed_steps = 0
-    starting_epoch = 0
-    best_knn = 100
-    best_f1 = 0
-    # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
-            accelerator.load_state(args.resume_from_checkpoint)
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = [f.name for f in os.scandir(os.getcwd()) if f.is_dir()]
-            dirs.sort(key=os.path.getctime)
-            path = dirs[-1]  # Sorts folders by date modified, most recent checkpoint is the last
-        # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(path)[0]
+            if "epoch" in training_difference:
+                starting_epoch = int(training_difference.replace("epoch_", "")) + 1
+                resume_step = None
+            else:
+                resume_step = int(training_difference.replace("step_", ""))
+                starting_epoch = resume_step // len(train_dataloader)
+                resume_step -= starting_epoch * len(train_dataloader)
 
-        if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
-            resume_step = None
-        else:
-            resume_step = int(training_difference.replace("step_", ""))
-            starting_epoch = resume_step // len(train_dataloader)
-            resume_step -= starting_epoch * len(train_dataloader)
-
-    for epoch in range(starting_epoch, args.num_train_epochs):
-        model.train()
-        if args.with_tracking:
-            total_loss = 0
-        for step, batch in enumerate(train_dataloader):
-            # We need to skip steps until we reach the resumed step
-            if args.resume_from_checkpoint and epoch == starting_epoch:
-                if resume_step is not None and step < resume_step:
-                    completed_steps += 1
-                    continue
-            nullify = (torch.rand_like(batch["attention_mask"].float()) > args.nullification_rate).long()
-            batch["attention_mask"] = batch["attention_mask"] * nullify
-            batch['output_hidden_states'] = True
-            outputs = model(**batch)
-            # loss = outputs.loss
-            loss = outputs.loss
-
-            if args.use_wandb:
-                wandb.log({'loss/task_loss':loss.item()}, step=completed_steps)      
-            # We keep track of the loss at each epoch
+        for epoch in range(starting_epoch, args.num_train_epochs):
+            model.train()
             if args.with_tracking:
-                total_loss += loss.detach().float()
-            loss = loss / args.gradient_accumulation_steps
-            accelerator.backward(loss)
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-                completed_steps += 1
+                total_loss = 0
+            for step, batch in enumerate(train_dataloader):
+                # We need to skip steps until we reach the resumed step
+                if args.resume_from_checkpoint and epoch == starting_epoch:
+                    if resume_step is not None and step < resume_step:
+                        completed_steps += 1
+                        continue
+                nullify = (torch.rand_like(batch["attention_mask"].float()) > args.nullification_rate).long()
+                batch["attention_mask"] = batch["attention_mask"] * nullify
+                batch['output_hidden_states'] = True
+                outputs = model(**batch)
+                # loss = outputs.loss
+                loss = outputs.loss
 
-            if isinstance(checkpointing_steps, int):
-                if completed_steps % checkpointing_steps == 0:
-                    output_dir = f"step_{completed_steps }"
-                    if args.output_dir is not None:
-                        output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(output_dir)
+                if args.use_wandb:
+                    wandb.log({'loss/task_loss':loss.item()}, step=completed_steps)      
+                # We keep track of the loss at each epoch
+                if args.with_tracking:
+                    total_loss += loss.detach().float()
+                loss = loss / args.gradient_accumulation_steps
+                accelerator.backward(loss)
+                if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+                    progress_bar.update(1)
+                    completed_steps += 1
 
-            if completed_steps >= args.max_train_steps:
-                break
-        if epoch % 1 == 0:
-            eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, tokenizer=tokenizer, label_list=label_list, target_layer=args.target_layer, topk=knn_topk)
+                if isinstance(checkpointing_steps, int):
+                    if completed_steps % checkpointing_steps == 0:
+                        output_dir = f"step_{completed_steps }"
+                        if args.output_dir is not None:
+                            output_dir = os.path.join(args.output_dir, output_dir)
+                        accelerator.save_state(output_dir)
+
+                if completed_steps >= args.max_train_steps:
+                    break
+            
+            eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, tokenizer=tokenizer, label_list=label_list, target_layer=args.target_layer, nullification_rate=args.nullification_rate)
             accelerator.print(f"epoch {epoch}:", eval_metric)
             if args.use_wandb:
                 for key,value in eval_metric.items():
                     wandb.log({f'metric/{key}':value}, step=completed_steps)
-            
-            if eval_metric['f1']>best_f1 and eval_metric['knn_top{}'.format(knn_topk)]<best_knn:
-                best_f1=eval_metric['f1']
-                best_knn=eval_metric['knn_top{}'.format(knn_topk)]
+            # save the best model
+            if eval_metric['f1'] > best_task_f1:
+                best_model_path = os.path.join(args.output_dir,'checkpoint_best')
+                if not os.path.exists(best_model_path):
+                    os.makedirs(best_model_path)
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(
+                    best_model_path, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+                )
+                if accelerator.is_main_process:
+                    tokenizer.save_pretrained(best_model_path)
+            # save the best knn eval result
+            if eval_metric['knn_top1'] > best_knn_top1:
+                best_knn_top1 = eval_metric['knn_top1']
+            if eval_metric['knn_top5'] > best_knn_top5:
+                best_knn_top5 = eval_metric['knn_top5']
+            if eval_metric['knn_top10'] > best_knn_top10:
+                best_knn_top10 = eval_metric['knn_top10']
+            if eval_metric['knn_rouge'] > best_knn_rouge:
+                best_knn_rouge = eval_metric['knn_rouge']
+            if eval_metric['f1'] > best_task_f1:
+                best_task_f1 = eval_metric['f1']
+                
+            if args.with_tracking:
+                accelerator.log(
+                    {
+                        "seqeval": eval_metric,
+                        "train_loss": total_loss.item() / len(train_dataloader),
+                        "epoch": epoch,
+                        "step": completed_steps,
+                    },
+                    step=completed_steps,
+                )
+
+            if args.push_to_hub and epoch < args.num_train_epochs - 1:
+                accelerator.wait_for_everyone()
                 unwrapped_model = accelerator.unwrap_model(model)
                 unwrapped_model.save_pretrained(
                     args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
                 )
                 if accelerator.is_main_process:
                     tokenizer.save_pretrained(args.output_dir)
-            
-        if args.with_tracking:
-            accelerator.log(
-                {
-                    "seqeval": eval_metric,
-                    "train_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                    "step": completed_steps,
-                },
-                step=completed_steps,
-            )
+                    repo.push_to_hub(
+                        commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
+                    )
 
-        if args.push_to_hub and epoch < args.num_train_epochs - 1:
-            accelerator.wait_for_everyone()
+            if args.checkpointing_steps == "epoch":
+                output_dir = f"epoch_{epoch}"
+                if args.output_dir is not None:
+                    output_dir = os.path.join(args.output_dir, output_dir)
+                accelerator.save_state(output_dir)
+
+        if args.with_tracking:
+            accelerator.end_training()
+        # save model
+        if args.output_dir is not None:
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.save_pretrained(
                 args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
             )
-            if accelerator.is_main_process:
-                tokenizer.save_pretrained(args.output_dir)
-                repo.push_to_hub(
-                    commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
-                )
-
-        if args.checkpointing_steps == "epoch":
-            output_dir = f"epoch_{epoch}"
-            if args.output_dir is not None:
-                output_dir = os.path.join(args.output_dir, output_dir)
-            accelerator.save_state(output_dir)
-
-    if args.with_tracking:
-        accelerator.end_training()
-
-    model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=args.use_wandb)
-    if eval_metric['f1']> 0.5 and model_attack_acc < 0.2 :
-        unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(
-            args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-        )
-        if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
-    
-    # if args.output_dir is not None:
-    #     accelerator.wait_for_everyone()
-    #     unwrapped_model = accelerator.unwrap_model(model)
-    #     unwrapped_model.save_pretrained(
-    #         args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-    #     )
-    #     if accelerator.is_main_process:
-    #         tokenizer.save_pretrained(args.output_dir)
-    #         if args.push_to_hub:
-    #             repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
+        # save train result
+        if args.output_dir is not None:
+            all_results = {f"eval_{k}": v for k, v in eval_metric.items()}
+            with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
+                json.dump(all_results, f)
+        # log the best knn result
+        if args.use_wandb:
+            wandb.log({'best/best_knn_top1_acc': best_knn_top1})
+            wandb.log({'best/best_knn_top5_acc': best_knn_top5})
+            wandb.log({'best/best_knn_top10_acc': best_knn_top10})
+            wandb.log({'best/best_knn_rouge_acc': best_knn_rouge})
+            wandb.log({'best/best_task_f1': best_task_f1})
+    if args.eval_task_model:
+        eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, tokenizer=tokenizer, label_list=label_list, target_layer=args.target_layer, nullification_rate=args.nullification_rate)
+        if args.use_wandb:
+            for key,value in eval_metric.items():
+                wandb.log({f'metric/{key}':value})
+    # empty cache
+    torch.cuda.empty_cache()
+    # train inversion model
+    if args.train_inversion_model:
+        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=args.use_wandb, output_dir=args.output_dir)
 
-    # wandb.finish()
-        # with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-        #     json.dump(
-        #         {"eval_accuracy": eval_metric["accuracy"], "train_loss": total_loss.item() / len(train_dataloader)}, f
-        #     )
+
+    wandb.finish()
+
 
 
 if __name__ == "__main__":

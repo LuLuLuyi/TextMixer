@@ -94,8 +94,8 @@ def word_filter(eval_label, filter_list):
     return allow_token_ids
 
 def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True, output_dir=None):
-    learning_rate=2e-5 # {roberta:5e-5, mlp:2e-4}
-    epochs=30
+    learning_rate=5e-5 # {roberta:5e-5, mlp:2e-4}
+    epochs=10
     device='cuda'
     inversion_model = InversionPLM(config)
 
@@ -243,6 +243,10 @@ def evaluate_with_knn_attack(model, tokenizer, dataloader, metric, accelerator, 
     # total
     total_cnt = 0
     rouge_total_cnt = 0
+    # filter special tokens
+    special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+    filter_tokens = list(set(special_tokens + simple_tokens))
     for step, batch in enumerate(dataloader):
         nullify = (torch.rand_like(batch["attention_mask"].float()) > nullification_rate).long()
         batch["attention_mask"] = batch["attention_mask"] * nullify
@@ -268,14 +272,7 @@ def evaluate_with_knn_attack(model, tokenizer, dataloader, metric, accelerator, 
         attention_mask = batch['attention_mask']
         valid_ids = attention_mask!=0
         eval_label = batch['input_ids']
-        PAD_IDS = 0
-        CLS_IDS = 101
-        SEP_IDS = 102
-        special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
-        simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
-        filter_tokens = list(set(special_tokens + simple_tokens))
         valid_ids[word_filter(eval_label, filter_tokens)] = False
-        # valid_ids[(eval_label==CLS_IDS) | (eval_label==SEP_IDS) | (eval_label==PAD_IDS)] = False
         eval_label = eval_label[valid_ids] # (samples)
         preds_feature = outputs.hidden_states[valid_ids]
         ed = torch.cdist(preds_feature, emb, p=2.0) # (samples, embeddings)
@@ -870,6 +867,17 @@ def main():
                 if completed_steps >= args.max_train_steps:
                     break
             eval_metric = evaluate_with_knn_attack(model, tokenizer, eval_dataloader, metric, accelerator, args.nullification_rate, target_layer=args.target_layer)
+            # save the best model
+            if eval_metric['accuracy'] > best_task_accuracy:
+                best_model_path = os.path.join(args.output_dir,'checkpoint_best')
+                if not os.path.exists(best_model_path):
+                    os.makedirs(best_model_path)
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(
+                    best_model_path, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+                )
+                if accelerator.is_main_process:
+                    tokenizer.save_pretrained(best_model_path)
             # save the best knn eval result
             if eval_metric['knn_top1'] > best_knn_top1:
                 best_knn_top1 = eval_metric['knn_top1']

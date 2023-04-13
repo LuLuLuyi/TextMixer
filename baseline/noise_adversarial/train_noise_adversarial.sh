@@ -1,14 +1,15 @@
-GPU=5
-MODEL=roberta-base
+GPU=6
+MODEL=bert-base-uncased
 
-for EPSILON in 0.5 # {0.05, 0.1, 0.5, 1, 5}
+for EPSILON in 1 # {0.05, 0.1, 0.5, 1, 5}
 do
-for W_ADVERSARIAL in 1 5 # {0.01, 0.05, 0.1, 0.5, 1, 5}
+for W_ADVERSARIAL in 0.1 # {0.01, 0.05, 0.1, 0.5, 1, 5}
 do
-for TASK_NAME in ag_news
+for TASK_NAME in sst2
 do
-MODEL_DIR=eps${EPSILON}_w_adversarial${W_ADVERSARIAL}
-OUTPUT_DIR=/root/contrastive_privacy/version_adversarial/ckpts/${TASK_NAME}/${MODEL_DIR}
+WANDB_NAME=noise_adversarial_${TASK_NAME}_eps${EPSILON}_wadv${W_ADVERSARIAL}
+MODEL_DIR=${WANDB_NAME}
+OUTPUT_DIR=/root/mixup/baseline/noise_adversarial/ckpts/${TASK_NAME}/${MODEL_DIR}
 
 CUDA_VISIBLE_DEVICES=$GPU python train_noise_adversarial.py \
   --model_name_or_path $MODEL \
@@ -17,10 +18,13 @@ CUDA_VISIBLE_DEVICES=$GPU python train_noise_adversarial.py \
   --use_wandb 1 \
   --add_noise 1 \
   --per_device_train_batch_size 32 \
+  --learning_rate 2e-5 \
   --num_train_epochs 30 \
+  --train_task_model \
+  --train_inversion_model \
   --epsilon $EPSILON \
   --w_adversarial $W_ADVERSARIAL \
-  --wandb_name noise_adversarial_${TASK_NAME}_eps${EPSILON}_w_adv${W_ADVERSARIAL}
+  --wandb_name $WANDB_NAME
 done
 done
 done

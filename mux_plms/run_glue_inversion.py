@@ -116,7 +116,11 @@ def dataloader2memory(dataloader, model, num_instances, target_layer=3, device='
                 sample_list = list(range(0,batch_size))
                 sample_list.remove(idx)
                 mux_sentence_ids = random.sample(sample_list, k=num_instances-1)
-                real_sentence_idx = random.randint(0, len(mux_sentence_ids))
+                # rand real sentence pos
+                # real_sentence_idx = random.randint(0, len(mux_sentence_ids))
+                # mux_sentence_ids.insert(real_sentence_idx, idx)
+                # fix real sentence pos
+                real_sentence_idx = len(mux_sentence_ids)
                 mux_sentence_ids.insert(real_sentence_idx, idx)
                 
                 mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}
@@ -339,7 +343,11 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config):
                 sample_list = list(range(0,batch_size))
                 sample_list.remove(idx)
                 mux_sentence_ids = random.sample(sample_list, k=config.num_instances-1)
-                real_sentence_idx = random.randint(0, len(mux_sentence_ids))
+                # rand real sentence pos
+                # real_sentence_idx = random.randint(0, len(mux_sentence_ids))
+                # mux_sentence_ids.insert(real_sentence_idx, idx)
+                # fix real sentence pos
+                real_sentence_idx = len(mux_sentence_ids)
                 mux_sentence_ids.insert(real_sentence_idx, idx)
                 
                 mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}

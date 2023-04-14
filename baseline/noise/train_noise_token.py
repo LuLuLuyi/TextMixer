@@ -1019,7 +1019,7 @@ def main():
             }
             
     if args.use_wandb:
-        project_name = f'dpnr_{args.task_name}'
+        project_name = f'dpnr_{args.dataset_name}' if 'ontonotes' not in args.dataset_name else 'dpnr_ontonotes'
         wandb.init(config=config, project=project_name, entity='privacy_cluster', name=args.wandb_name)
     if args.train_task_model:
         # Train!

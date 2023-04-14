@@ -131,7 +131,7 @@ def word_filter(eval_label, filter_list):
     return allow_token_ids
 
 def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True, output_dir=None):
-    learning_rate=5e-5 # {roberta:5e-5, mlp:2e-4}
+    learning_rate=2e-5 # {roberta:5e-5, mlp:2e-4}
     epochs=10
     device='cuda'
     inversion_model = InversionPLM(config)

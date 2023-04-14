@@ -560,6 +560,7 @@ class MuxedBertForSequenceClassification(BertPreTrainedModel):
         inputs_embeds=None,
         labels: Optional[torch.Tensor] = None,
         return_dict: Optional[bool] = None,
+        real_sentence_idx=None,
     ):
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -773,7 +774,8 @@ class MuxedBertForSequenceClassification(BertPreTrainedModel):
             # add noise for a random embedding before multiply instance_embed
             if self.config.add_embedding_noise:
                 for modified_batch_idx in range(modified_batch_size):
-                    noise_pos = random.randint(0, num_instances-1)
+                    # noise_pos = random.randint(0, num_instances-1)
+                    noise_pos = real_sentence_idx
                     target_noise = self.m.sample(embedding_output[modified_batch_idx, noise_pos].shape).type_as(embedding_output[modified_batch_idx, noise_pos])
                     embedding_output[modified_batch_idx, noise_pos] = embedding_output[modified_batch_idx, noise_pos] + target_noise
                 

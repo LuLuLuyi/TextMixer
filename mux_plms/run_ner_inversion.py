@@ -83,13 +83,33 @@ class InversionPLM(nn.Module):
         logits = outputs.logits
         pred = torch.argmax(F.softmax(logits,dim=-1), dim=2)
         return logits, pred
-    
+
+def mux_token_selection(model, filter_tokens, batch, real_sentence_idx): 
+    emb = model.bert.embeddings.word_embeddings.weight
+    real_sentence_embedding = model.bert.embeddings(input_ids=batch['input_ids'][real_sentence_idx].unsqueeze(0))
+    ed = torch.cdist(real_sentence_embedding, emb, p=2.0) # (samples, embeddings)
+    candidate_token_ids_top100 = torch.topk(ed, 100, largest=False)[1] # (samples, topk)
+    candidate_token_ids_top100 = candidate_token_ids_top100.repeat(10,1,1)
+    # 筛选出要替换的词
+    invalid_ids = (batch['attention_mask'] == 0)
+    invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
+    # 真实句子的词不进行替换操作
+    invalid_ids[real_sentence_idx] = False
+    # 生成待替换词的随机下标
+    selection_ids = torch.randint(low=1, high=100, size=batch['input_ids'][invalid_ids].size()).unsqueeze(1).to('cuda')
+    selection_tokens = torch.gather(input=candidate_token_ids_top100[invalid_ids], dim=1, index=selection_ids)
+    batch['input_ids'][invalid_ids] = selection_tokens.squeeze(1)
+    return batch    
     
 def dataloader2memory(dataloader, model, num_instances, target_layer=3, device='cuda'):
     token_shuffle = True
     features = []
     pro_bar = tqdm(range(len(dataloader)))
     model.eval()
+    # filter special tokens
+    special_tokens = tokenizer.convert_tokens_to_ids(['[PAD]','[SEP]'])
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'the','a','of','and','s','to','it','is','that','in','as','on','(',')'])
+    filter_tokens = list(set(special_tokens + simple_tokens))
     for batch in dataloader:
         with torch.no_grad():
             if 'idx' in batch.keys():
@@ -102,9 +122,16 @@ def dataloader2memory(dataloader, model, num_instances, target_layer=3, device='
                 sample_list = list(range(0,batch_size))
                 sample_list.remove(idx)
                 mux_sentence_ids = random.sample(sample_list, k=num_instances-1)
-                mux_sentence_ids.insert(random.randint(0, len(mux_sentence_ids)),idx)
+                # rand real sentence pos
+                real_sentence_idx = random.randint(0, len(mux_sentence_ids))
+                mux_sentence_ids.insert(real_sentence_idx, idx)
+                # fix real sentence pos
+                # real_sentence_idx = len(mux_sentence_ids)
+                # mux_sentence_ids.insert(real_sentence_idx, idx)
                 
-                mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()} 
+                mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}
+                mux_minibatch = mux_token_selection(model, filter_tokens, mux_minibatch, real_sentence_idx)
+                mux_minibatch['real_sentence_idx'] = real_sentence_idx
                 # token shuffle
                 # if token_shuffle:
                 #     for idx in range(sequence_length):
@@ -142,8 +169,8 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     optimizer = torch.optim.AdamW(inversion_model.parameters(), lr=learning_rate)
     
     print('load dataloader to memory')
-    train_dataloader = dataloader2memory(train_dataloader, model, config.num_instances, config.target_layer, device)
-    eval_dataloader = dataloader2memory(eval_dataloader, model, config.num_instances, config.target_layer, device)
+    train_dataloader = dataloader2memory(train_dataloader, model, tokenizer, config.num_instances, config.target_layer, device)
+    eval_dataloader = dataloader2memory(eval_dataloader, model, tokenizer, config.num_instances, config.target_layer, device)
     print('done')
     
     total_step = len(train_dataloader) * epochs
@@ -231,7 +258,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                         f.write(f"{'origin_token':<20s} | ")
                         for mux_idx in range(config.num_instances):
                             f.write(f"{f'mux_token{mux_idx}':<20s}")
-                        f.write(" | ") 
+                        f.write(" | ")
                         for rec_idx in range(config.num_instances):
                             f.write(f"{f'recover_token{rec_idx}':<20s}")
                         f.write('\n')
@@ -302,7 +329,47 @@ def rouge(input_ids, pred_ids, tokenizer):
         total_cnt += 1
     return hit_cnt, total_cnt
 
-def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config):
+def compute_metrics(metric, return_entity_level_metrics=False):
+        results = metric.compute()
+        if return_entity_level_metrics:
+            # Unpack nested dictionaries
+            final_results = {}
+            for key, value in results.items():
+                if isinstance(value, dict):
+                    for n, v in value.items():
+                        final_results[f"{key}_{n}"] = v
+                else:
+                    final_results[key] = value
+            return final_results
+        else:
+            return {
+                "precision": results["overall_precision"],
+                "recall": results["overall_recall"],
+                "f1": results["overall_f1"],
+                "accuracy": results["overall_accuracy"],
+            }
+
+def get_labels(predictions, references, label_list):
+        # Transform predictions and references tensos to numpy arrays
+        if predictions.device == "cpu":
+            y_pred = predictions.detach().clone().numpy()
+            y_true = references.detach().clone().numpy()
+        else:
+            y_pred = predictions.detach().cpu().clone().numpy()
+            y_true = references.detach().cpu().clone().numpy()
+
+        # Remove ignored index (special tokens)
+        true_predictions = [
+            [label_list[p] for (p, l) in zip(pred, gold_label) if l != -100]
+            for pred, gold_label in zip(y_pred, y_true)
+        ]
+        true_labels = [
+            [label_list[l] for (p, l) in zip(pred, gold_label) if l != -100]
+            for pred, gold_label in zip(y_pred, y_true)
+        ]
+        return true_predictions, true_labels
+
+def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, label_list):
     emb = model.bert.embeddings.word_embeddings.weight
     device = 'cuda'
     model.eval()
@@ -314,6 +381,10 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config):
     # total
     total_cnt = 0
     rouge_total_cnt = 0
+    # filter special tokens
+    special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+    filter_tokens = list(set(special_tokens + simple_tokens))
     for step, batch in enumerate(dataloader):
         with torch.no_grad():
             batch = {key:value.to(device) for key,value in batch.items()}
@@ -324,10 +395,16 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config):
                 sample_list = list(range(0,batch_size))
                 sample_list.remove(idx)
                 mux_sentence_ids = random.sample(sample_list, k=config.num_instances-1)
+                # rand real sentence pos
                 real_sentence_idx = random.randint(0, len(mux_sentence_ids))
                 mux_sentence_ids.insert(real_sentence_idx, idx)
+                # fix real sentence pos
+                # real_sentence_idx = len(mux_sentence_ids)
+                # mux_sentence_ids.insert(real_sentence_idx, idx)
                 
-                mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()} 
+                mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}
+                mux_minibatch = mux_token_selection(model, tokenizer ,mux_minibatch, real_sentence_idx)
+                mux_minibatch['real_sentence_idx'] = real_sentence_idx 
                 outputs = model(**mux_minibatch)
                 hidden_states = outputs.hidden_states
                 predictions = outputs.logits.argmax(dim=-1)
@@ -335,21 +412,19 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config):
                 all_hidden_states.append(hidden_states)
             
         # evaluate
-        all_predictions = torch.tensor(all_predictions)
+        all_predictions = torch.stack(all_predictions)
         all_hidden_states = torch.cat(all_hidden_states, dim=0)
-        references = batch["labels"]
+        labels = batch["labels"]
+        preds, refs = get_labels(all_predictions, labels, label_list)
         metric.add_batch(
-            predictions=all_predictions,
-            references=references,
+            predictions=preds,
+            references=refs,
         )
         
         attention_mask = batch['attention_mask']
         valid_ids = attention_mask!=0  
         eval_label = batch['input_ids']
-        PAD_IDS = 0
-        CLS_IDS = 101
-        SEP_IDS = 102
-        valid_ids[(eval_label==CLS_IDS) | (eval_label==SEP_IDS) | (eval_label==PAD_IDS)] = False
+        valid_ids[word_filter(eval_label, filter_tokens)] = False
         eval_label = eval_label[valid_ids] # (samples)
         preds_feature = all_hidden_states[valid_ids]
         ed = torch.cdist(preds_feature, emb, p=2.0) # (samples, embeddings)
@@ -365,7 +440,7 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config):
         rouge_hit_cnt += r_hit_cnt
         rouge_total_cnt += r_total_cnt
     # compute metric
-    eval_metric = metric.compute()
+    eval_metric = compute_metrics(metric)
     eval_metric['knn_top1'] = top1_hit_cnt/total_cnt
     eval_metric['knn_top5'] = top5_hit_cnt/total_cnt
     eval_metric['knn_top10'] = top10_hit_cnt/total_cnt
@@ -621,6 +696,12 @@ class ModelArguments:
         default=False,
     )
     add_embedding_noise: bool = field(
+        default=False,
+    )
+    eval_with_knn_attack: bool = field(
+        default=False,
+    )
+    train_inversion_model: bool = field(
         default=False,
     )
 
@@ -1075,8 +1156,13 @@ def main():
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=60, drop_last=True)
     torch.cuda.empty_cache()
-    eval_metric = evaluate_with_knn_attack(model, eval_dataloader, tokenizer, metric, config)       
-    model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, model_args.use_wandb)
+    if model_args.eval_with_knn_attack:
+        eval_metric = evaluate_with_knn_attack(model, eval_dataloader, tokenizer, metric, config, label_list)
+        if model_args.use_wandb:
+            for key,value in eval_metric.items():
+                wandb.log({f'metric/{key}':value})
+    if model_args.train_inversion_model:
+        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, model_args.use_wandb)
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)

@@ -122,7 +122,22 @@ while :; do
                 die 'ERROR: "--add_embedding_noise" requires a non-empty option argument.'
             fi
             ;;
-
+        --train_inversion_model)
+            if [ "$2" ]; then
+                TRAIN_INVERSION_MODEL=$2
+                shift
+            else
+                die 'ERROR: "--train_inversion_model" requires a non-empty option argument.'
+            fi
+            ;;
+        --eval_with_knn_attack)
+            if [ "$2" ]; then
+                EVAL_WITH_KNN_ATTACK=$2
+                shift
+            else
+                die 'ERROR: "--eval_with_knn_attack" requires a non-empty option argument.'
+            fi
+            ;;
         --batch_size)
             if [ "$2" ]; then
                 BATCH_SIZE=$2
@@ -334,7 +349,9 @@ CMD="python run_glue_inversion.py \
 --num_hidden_demux_layers 3 \
 --save_total_limit 1 \
 --epsilon $EPSILON \
---add_embedding_noise $ADD_EMBEDDING_NOISE"
+--add_embedding_noise $ADD_EMBEDDING_NOISE \
+--train_inversion_model $TRAIN_INVERSION_MODEL \
+--eval_with_knn_attack $EVAL_WITH_KNN_ATTACK"
 if [ "$DO_TRAIN" -eq 1 ]; then
         CMD="${CMD} --do_train"
 fi

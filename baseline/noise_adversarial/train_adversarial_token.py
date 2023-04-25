@@ -56,6 +56,7 @@ from transformers import (
 import wandb
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
+from rouge_score import rouge_scorer
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -108,7 +109,7 @@ class InversionMLP(nn.Module):
         return logits, pred
     
 class InversionPLM(nn.Module):
-    def __init__(self, config, model_name_or_path='roberta-base'):
+    def __init__(self, config, model_name_or_path='bert-base-uncased'):
         super(InversionPLM, self).__init__()
         self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
         self.loss = torch.nn.CrossEntropyLoss()

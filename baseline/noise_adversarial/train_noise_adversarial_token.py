@@ -325,7 +325,7 @@ def get_labels(predictions, references, label_list):
         ]
         return true_predictions, true_labels
 
-def evaluate_with_knn_attack(model, dataloader, metric, accelerator, tokenizer, label_list, nullification_rate=-1, target_layer=3, pad_to_max_length=True):
+def evaluate_with_knn_attack(model, dataloader, metric, accelerator, tokenizer, label_list, target_layer=3, pad_to_max_length=True):
     emb = model.bert.embeddings.word_embeddings.weight
     model.eval()
     samples_seen = 0
@@ -342,8 +342,6 @@ def evaluate_with_knn_attack(model, dataloader, metric, accelerator, tokenizer, 
     simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
     filter_tokens = list(set(special_tokens + simple_tokens))
     for step, batch in enumerate(dataloader):
-        nullify = (torch.rand_like(batch["attention_mask"].float()) > nullification_rate).long()
-        batch["attention_mask"] = batch["attention_mask"] * nullify
         batch['output_hidden_states'] = True
         with torch.no_grad():
             outputs = model(**batch)
@@ -979,7 +977,7 @@ def main():
         },
     ]
     
-    adversarial_model_optimizer = torch.optim.AdamW(adversarial_model_optimizer_grouped_parameters, lr=1e-4)
+    adversarial_model_optimizer = torch.optim.AdamW(adversarial_model_optimizer_grouped_parameters, lr=5e-4)
     # Use the device given by the `accelerator` object.
     device = accelerator.device
     model.to(device)
@@ -1173,7 +1171,7 @@ def main():
                 if completed_steps >= args.max_train_steps:
                     break
             
-            eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, tokenizer=tokenizer, label_list=label_list, target_layer=args.target_layer, nullification_rate=args.nullification_rate)
+            eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, tokenizer=tokenizer, label_list=label_list, target_layer=args.target_layer)
             accelerator.print(f"epoch {epoch}:", eval_metric)
             if args.use_wandb:
                 for key,value in eval_metric.items():
@@ -1252,7 +1250,7 @@ def main():
             wandb.log({'best/best_knn_rouge_acc': best_knn_rouge})
             wandb.log({'best/best_task_f1': best_task_f1})
     if args.eval_task_model:
-        eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, tokenizer=tokenizer, label_list=label_list, target_layer=args.target_layer, nullification_rate=args.nullification_rate)
+        eval_metric = evaluate_with_knn_attack(model, eval_dataloader, metric, accelerator, tokenizer=tokenizer, label_list=label_list, target_layer=args.target_layer)
         if args.use_wandb:
             for key,value in eval_metric.items():
                 wandb.log({f'metric/{key}':value})

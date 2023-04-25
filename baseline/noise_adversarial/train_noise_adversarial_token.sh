@@ -1,9 +1,9 @@
-GPU=4
+GPU=0
 MODEL=bert-base-uncased
 
-for EPSILON in 0.1 0.5 1 2 5  # {0.05, 0.1, 0.5, 1, 5}
+for EPSILON in 0.1  # {0.05, 0.1, 0.5, 1, 5}
 do
-for W_ADVERSARIAL in 0.01 # {0.01, 0.05, 0.1, 0.5, 1, 5}
+for W_ADVERSARIAL in 0.01 0.05 0.1 0.5 1 5 # {0.01, 0.05, 0.1, 0.5, 1, 5}
 do
 WANDB_NAME=noise_adversarial_conll2003_eps${EPSILON}_wadv${W_ADVERSARIAL}
 MODEL_DIR=${WANDB_NAME}

@@ -117,8 +117,11 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
         # 真实句子的词不进行替换操作
         invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
         # 生成待替换词的随机下标
-        selection_ids = torch.randint(low=1, high=10, size=batch['input_ids'][invalid_ids].size()).unsqueeze(1).to('cuda')
+        selection_ids = torch.randint(low=1, high=100, size=batch['input_ids'][invalid_ids].size()).unsqueeze(1).to('cuda')
         selection_tokens = torch.gather(input=candidate_token_ids_top100[invalid_ids], dim=1, index=selection_ids)
         batch['input_ids'][invalid_ids] = selection_tokens.squeeze(1)
     elif select_strategy == 'random':
@@ -127,6 +130,9 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
         # 真实句子的词不进行替换操作
         invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
         # 生成待替换词的随机下标
         selection_ids = torch.randint(low=0, high=len(dataset_word_dict)-1, size=batch['input_ids'][invalid_ids].size())
         selection_tokens = dataset_word_dict[selection_ids].to('cuda')

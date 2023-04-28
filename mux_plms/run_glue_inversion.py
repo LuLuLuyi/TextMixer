@@ -99,8 +99,8 @@ class InversionPLM(nn.Module):
         return logits, pred
 
 def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict): 
-    select_strategy = 'similar' # [ similar, far, random]
-    batch_size = batch['input_ids'].size()[0]
+    select_strategy = 'random' # [ similar, far, random]
+    batch_size, sequence_length = batch['input_ids'].size()
     emb = model.bert.embeddings.word_embeddings.weight
     emb_dataset = emb[dataset_word_dict]
     dataset_word_dict = torch.tensor(dataset_word_dict)
@@ -137,6 +137,27 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         selection_ids = torch.randint(low=0, high=len(dataset_word_dict)-1, size=batch['input_ids'][invalid_ids].size())
         selection_tokens = dataset_word_dict[selection_ids].to('cuda')
         batch['input_ids'][invalid_ids] = selection_tokens
+    elif select_strategy == 'self_filling':
+        # 筛选出要替换的词
+        invalid_ids = (batch['attention_mask'] == 0)
+        invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
+        # 真实句子的词不进行替换操作
+        invalid_ids[real_sentence_idx] = False
+        # 生成填充的batch
+        filled_input_ids = torch.clone(batch['input_ids'])
+        for sequence_idx in range(batch_size):
+            sep_idx = list(batch['input_ids'][sequence_idx]).index(102)
+            for word_idx in range(sep_idx, sequence_length):
+                filled_input_ids[sequence_idx][word_idx] = batch['input_ids'][sequence_idx][word_idx%(sep_idx-1)+1]
+        # 把假句子用自身填满
+        filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
+        batch['input_ids'] = filled_input_ids
+            
+        # # 只对假句子长度不足的情况进行替换操作
+        # real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        # invalid_ids[:,real_sentence_length:] = False
+        
+        
     return batch
     
 def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_dict, target_layer=3, device='cuda'):
@@ -1161,6 +1182,7 @@ def main():
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=60, drop_last=True)
     torch.cuda.empty_cache()
+    set_seed(2)
     if model_args.eval_with_knn_attack:
         print('statistic dataset word dict')
         dataset_word_dict = get_dataset_word_dict(train_dataloader, eval_dataloader)

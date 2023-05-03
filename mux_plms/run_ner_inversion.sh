@@ -159,6 +159,14 @@ while :; do
                 die 'ERROR: "--task" requires a non-empty option argument.'
             fi
             ;;
+        --dataset_name)
+            if [ "$2" ]; then
+                DATASET_NAME=$2
+                shift
+            else
+                die 'ERROR: "--task" requires a non-empty option argument.'
+            fi
+            ;;
         --wandb_name)
             if [ "$2" ]; then
                 WANDB_NAME=$2
@@ -233,7 +241,7 @@ declare -A task2labelcol
 task2labelcol[ner]="ner_tags"
 task2labelcol[pos]="upos"
 
-DATASET_NAME=${task2dataset[$TASK_NAME]}
+# DATASET_NAME=${task2dataset[$TASK_NAME]}
 LABEL_COLUMN_NAME=${task2labelcol[$TASK_NAME]}
 
 # other miscelleneous params
@@ -327,7 +335,6 @@ CMD="python run_ner_inversion.py \
 --load_best_model_at_end 1 \
 --metric_for_best_model ${BEST_METRIC} \
 --dataset_name ${DATASET_NAME} \
---label_column_name ${LABEL_COLUMN_NAME} \
 --num_hidden_demux_layers 3 \
 --save_total_limit 1 \
 --epsilon $EPSILON \

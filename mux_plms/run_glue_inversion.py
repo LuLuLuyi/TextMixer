@@ -60,6 +60,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+from sklearn.cluster import KMeans
 
 
 task_to_keys = {
@@ -70,6 +71,7 @@ task_to_keys = {
     "qqp": ("question1", "question2"),
     "rte": ("sentence1", "sentence2"),
     "sst2": ("sentence", None),
+    "imdb": ("text", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
 }
@@ -99,14 +101,14 @@ class InversionPLM(nn.Module):
         return logits, pred
 
 def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict): 
-    select_strategy = 'random' # [ similar, far, random]
+    select_strategy = 'None' # [ similar, far, random]
     batch_size, sequence_length = batch['input_ids'].size()
     emb = model.bert.embeddings.word_embeddings.weight
-    emb_dataset = emb[dataset_word_dict]
     dataset_word_dict = torch.tensor(dataset_word_dict)
     if select_strategy == 'similar' or select_strategy=='far':
         largest = True if select_strategy=='far' else False
         real_sentence_embedding = model.bert.embeddings(input_ids=batch['input_ids'][real_sentence_idx].unsqueeze(0))
+        emb_dataset = emb[dataset_word_dict]
         ed = torch.cdist(real_sentence_embedding, emb_dataset, p=2.0) # (samples, embeddings)
         candidate_token_ids_top100_idx = torch.topk(ed, 100, largest=largest)[1] # (samples, topk)
         candidate_token_ids_top100 = dataset_word_dict[candidate_token_ids_top100_idx.view(-1)]
@@ -143,6 +145,9 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
         # 真实句子的词不进行替换操作
         invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
         # 生成填充的batch
         filled_input_ids = torch.clone(batch['input_ids'])
         for sequence_idx in range(batch_size):
@@ -151,11 +156,23 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
                 filled_input_ids[sequence_idx][word_idx] = batch['input_ids'][sequence_idx][word_idx%(sep_idx-1)+1]
         # 把假句子用自身填满
         filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
-        batch['input_ids'] = filled_input_ids
-            
-        # # 只对假句子长度不足的情况进行替换操作
-        # real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
-        # invalid_ids[:,real_sentence_length:] = False
+        batch['input_ids'][invalid_ids] = filled_input_ids[invalid_ids]
+    elif select_strategy == "cluster":
+        token_embeddings = model.bert.embeddings.word_embeddings.weight.cpu().detach().numpy()
+        clusters = KMeans(n_clusters=100, random_state=0).fit(token_embeddings)
+        token_embeddings_cluster_ids = clusters.predict(token_embeddings)
+        cluster_center = torch.tensor(clusters.cluster_centers_).to(model.device)
+        token2cluster = {}
+        clusters2token_list = {}
+        for token_embeddings_ids, cluster_ids in enumerate(token_embeddings_cluster_ids):
+            token2cluster[token_embeddings_ids] = cluster_ids.item()
+            if cluster_ids not in clusters2token_list:
+                clusters2token_list[cluster_ids] = []
+            clusters2token_list[cluster_ids].extend(token_embeddings_ids)
+            # cluster_center = torch.tensor(clusters.cluster_centers_).to(model.device)
+        # cluster2token_list
+        pass     
+        
         
         
     return batch
@@ -233,7 +250,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     # batch_size=32 # {roberta:32, mlp:64}
     learning_rate=2e-5 # {roberta:1e-5 2e-5 5e-5, mlp:2e-4}
     device='cuda'
-    epochs=30
+    epochs=20
     topk = 1
     inversion_model = InversionPLM(config)
 
@@ -291,78 +308,79 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
             progress_bar.update(1)
             progress_bar.set_description('inversion_model_loss:{}'.format(loss.item()))
 
-        with torch.no_grad():
-            hit_cnt = 0
-            total_cnt = 0
-            case_study_dir = f'{config.wandb_name}'
-            case_study_path = os.path.join(f'/root/mixup/mux_plms/case_study/{config.task_name}/mux_{config.num_instances}',case_study_dir)
-            if not os.path.exists(case_study_path):
-                os.makedirs(case_study_path)
-            with open(os.path.join(case_study_path, f'inversion_epoch{epoch}.txt'),'w') as f:
-                for batch in eval_dataloader:
-                    batch = {key:value.to(device) for key,value in batch.items()}
-                    # batch['output_hidden_states'] = True
-                    
-                    # outputs = model(**batch)
-                    # target_hidden_states = outputs.hidden_states[target_layer]
-                    target_hidden_states = batch['hidden_states']
-                    eval_label = batch['input_ids']
-                    attention_mask = batch['attention_mask']
+        if (epoch+1) %4 == 0:
+            with torch.no_grad():
+                hit_cnt = 0
+                total_cnt = 0
+                case_study_dir = f'{config.wandb_name}'
+                case_study_path = os.path.join(f'/root/mixup/mux_plms/case_study/{config.task_name}/mux_{config.num_instances}',case_study_dir)
+                if not os.path.exists(case_study_path):
+                    os.makedirs(case_study_path)
+                with open(os.path.join(case_study_path, f'inversion_epoch{epoch}.txt'),'w') as f:
+                    for batch in eval_dataloader:
+                        batch = {key:value.to(device) for key,value in batch.items()}
+                        # batch['output_hidden_states'] = True
+                        
+                        # outputs = model(**batch)
+                        # target_hidden_states = outputs.hidden_states[target_layer]
+                        target_hidden_states = batch['hidden_states']
+                        eval_label = batch['input_ids']
+                        attention_mask = batch['attention_mask']
 
-                    bsz, seq_len, dim = target_hidden_states.shape
-                    feature = target_hidden_states
-                    feature = feature.to(device)
-                    attention_mask = attention_mask.to(device)
+                        bsz, seq_len, dim = target_hidden_states.shape
+                        feature = target_hidden_states
+                        feature = feature.to(device)
+                        attention_mask = attention_mask.to(device)
 
-                    # feature = torch.cat([feature[:, 0], feature[:, 1]], dim=2)
-                    
-                    pred_logits, preds = inversion_model.predict(feature, attention_mask=attention_mask)
+                        # feature = torch.cat([feature[:, 0], feature[:, 1]], dim=2)
+                        
+                        pred_logits, preds = inversion_model.predict(feature, attention_mask=attention_mask)
 
-                    valid_ids = attention_mask!=0
-                    
-                    
-                    valid_ids[word_filter(eval_label, filter_tokens)] = False
-                    eval_label = batch['input_ids']
-                    eval_label = eval_label[valid_ids] 
-                    preds = torch.topk(pred_logits, k=topk)[1]
-                    preds = preds[valid_ids]
-                    hit_cnt += (eval_label.unsqueeze(1) == preds).int().sum().item()
-                    total_cnt += eval_label.shape[0]
-                    # 进行case_study记录
-                    top10_preds = torch.topk(pred_logits, k=10)[1]
-                    for seq_idx in range(0,  batch['input_ids'].size()[0]):
-                        f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case start-----------------------------\n')
-                        # titile
-                        f.write(f"{'origin_token':<20s} | ")
-                        for mux_idx in range(config.num_instances):
-                            f.write(f"{f'mux_token{mux_idx}':<20s}")
-                        f.write(" | ")
-                        for rec_idx in range(config.num_instances):
-                            f.write(f"{f'recover_token{rec_idx}':<20s}")
-                        f.write('\n')
-                        # f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
-                        # f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")
-                        for word_idx in range(0, batch['input_ids'].size()[1]):
-                            if valid_ids[seq_idx][word_idx]:
-                                f.write(f"{tokenizer.decode(batch['input_ids'][seq_idx][word_idx]):<20s} | ")
-                                for mux_idx in range(config.num_instances):
-                                    f.write(f"{tokenizer.decode(batch['mux_sentence_input_ids'][seq_idx][mux_idx][word_idx]):<20s}")
-                                f.write(" | ")
-                                for rec_idx in range(config.num_instances):
-                                    f.write(f"{tokenizer.decode(top10_preds[seq_idx][word_idx][rec_idx]):<20s}")
-                                # if token hited in last epoch
-                                if epoch == epochs - 1: 
-                                    if batch['input_ids'][seq_idx][word_idx] == top10_preds[seq_idx][word_idx][0]:
-                                        hit_tokens[tokenizer.decode(batch['input_ids'][seq_idx][word_idx])] = hit_tokens.get(tokenizer.decode(batch['input_ids'][seq_idx][word_idx]), 0) + 1
-                                        mux_tokens = [tokenizer.decode(batch['mux_sentence_input_ids'][seq_idx][mux_idx][word_idx]) for mux_idx in range(config.num_instances)]
-                                        mux_tokens_list.append(mux_tokens)
-                                f.write("\n")
-                        f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case end-----------------------------\n')
-                        f.write('\n')
-            model_attack_acc = hit_cnt/total_cnt
-            print('attack acc:{}'.format(hit_cnt/total_cnt))
-            if use_wandb:
-                wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
+                        valid_ids = attention_mask!=0
+                        
+                        
+                        valid_ids[word_filter(eval_label, filter_tokens)] = False
+                        eval_label = batch['input_ids']
+                        eval_label = eval_label[valid_ids] 
+                        preds = torch.topk(pred_logits, k=topk)[1]
+                        preds = preds[valid_ids]
+                        hit_cnt += (eval_label.unsqueeze(1) == preds).int().sum().item()
+                        total_cnt += eval_label.shape[0]
+                        # 进行case_study记录
+                        top10_preds = torch.topk(pred_logits, k=10)[1]
+                        for seq_idx in range(0,  batch['input_ids'].size()[0]):
+                            f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case start-----------------------------\n')
+                            # titile
+                            f.write(f"{'origin_token':<20s} | ")
+                            for mux_idx in range(config.num_instances):
+                                f.write(f"{f'mux_token{mux_idx}':<20s}")
+                            f.write(" | ")
+                            for rec_idx in range(config.num_instances):
+                                f.write(f"{f'recover_token{rec_idx}':<20s}")
+                            f.write('\n')
+                            # f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
+                            # f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")
+                            for word_idx in range(0, batch['input_ids'].size()[1]):
+                                if valid_ids[seq_idx][word_idx]:
+                                    f.write(f"{tokenizer.decode(batch['input_ids'][seq_idx][word_idx]):<20s} | ")
+                                    for mux_idx in range(config.num_instances):
+                                        f.write(f"{tokenizer.decode(batch['mux_sentence_input_ids'][seq_idx][mux_idx][word_idx]):<20s}")
+                                    f.write(" | ")
+                                    for rec_idx in range(config.num_instances):
+                                        f.write(f"{tokenizer.decode(top10_preds[seq_idx][word_idx][rec_idx]):<20s}")
+                                    # if token hited in last epoch
+                                    if epoch == epochs - 1: 
+                                        if batch['input_ids'][seq_idx][word_idx] == top10_preds[seq_idx][word_idx][0]:
+                                            hit_tokens[tokenizer.decode(batch['input_ids'][seq_idx][word_idx])] = hit_tokens.get(tokenizer.decode(batch['input_ids'][seq_idx][word_idx]), 0) + 1
+                                            mux_tokens = [tokenizer.decode(batch['mux_sentence_input_ids'][seq_idx][mux_idx][word_idx]) for mux_idx in range(config.num_instances)]
+                                            mux_tokens_list.append(mux_tokens)
+                                    f.write("\n")
+                            f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case end-----------------------------\n')
+                            f.write('\n')
+                model_attack_acc = hit_cnt/total_cnt
+                print('attack acc:{}'.format(hit_cnt/total_cnt))
+                if use_wandb:
+                    wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
     
     with open(os.path.join(case_study_path, 'hit_tokens_stat.txt'),'w') as f:
         hit_tokens = sorted(hit_tokens.items(), key=lambda x: x[1], reverse=True)
@@ -781,9 +799,12 @@ def main():
     # download the dataset.
     if data_args.task_name is not None:
         # Downloading and loading a dataset from the hub.
-        datasets = load_dataset(
-            "glue", data_args.task_name, cache_dir=model_args.cache_dir
-        )
+        if data_args.task_name == "imdb":
+            datasets = load_dataset("imdb")
+        else:
+            datasets = load_dataset(
+                "glue", data_args.task_name, cache_dir=model_args.cache_dir
+            )
     elif data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         datasets = load_dataset(
@@ -1018,10 +1039,10 @@ def main():
         train_dataset = train_dataset.select(range(data_args.max_train_samples))
 
     # if training_args.do_eval:
-    if "validation" not in datasets and "validation_matched" not in datasets:
-        raise ValueError("--do_eval requires a validation dataset")
+    # if "validation" not in datasets and "validation_matched" not in datasets:
+    #     raise ValueError("--do_eval requires a validation dataset")
     eval_dataset = datasets[
-        "validation_matched" if data_args.task_name == "mnli" else "validation"
+        "test" if data_args.task_name == "imdb" else "validation"
     ]
     if data_args.max_eval_samples is not None:
         eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
@@ -1048,7 +1069,10 @@ def main():
 
     # Get the metric function
     if data_args.task_name is not None:
-        metric = evaluate.load("glue", data_args.task_name)
+        if data_args.task_name == "imdb":
+            metric = evaluate.load("accuracy")
+        else:
+            metric = evaluate.load("glue", data_args.task_name)
     else:
         metric = evaluate.load("accuracy")
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
@@ -1182,7 +1206,7 @@ def main():
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=60, drop_last=True)
     torch.cuda.empty_cache()
-    set_seed(2)
+    # set_seed(3)
     if model_args.eval_with_knn_attack:
         print('statistic dataset word dict')
         dataset_word_dict = get_dataset_word_dict(train_dataloader, eval_dataloader)

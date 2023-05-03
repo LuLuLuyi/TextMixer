@@ -242,6 +242,7 @@ task2numstepsmap[sst2]=20000
 task2numstepsmap[cola]=10000
 task2numstepsmap[stsb]=10000
 task2numstepsmap[mrpc]=10000
+task2numstepsmap[imdb]=10000
 
 declare -A task2numevalstepsmap
 task2numevalstepsmap[mnli]=5000
@@ -253,6 +254,7 @@ task2numevalstepsmap[sst2]=2000
 task2numevalstepsmap[cola]=500
 task2numevalstepsmap[stsb]=500
 task2numevalstepsmap[mrpc]=500
+task2numevalstepsmap[imdb]=1000
 
 BEST_METRIC=${task2bestmetricmap[$TASK_NAME]}
 NUM_TRAIN_STEPS=${task2numstepsmap[$TASK_NAME]}
@@ -305,10 +307,10 @@ else
 fi
 
 if [[ $LEARN_MUXING -ge 1 ]]; then
-    OUTPUT_DIR=$OUTPUT_DIR_BASE/${TASK_NAME}_${MUXING}_${DEMUXING}_${NUM_INSTANCES}_norm_${RANDOM_ENCODING_NORM}_rc_${RETRIEVAL_LOSS_COEFF}_lr${LEARNING_RATE}_tc_${TASK_LOSS_COEFF}_learntmuxing
+    OUTPUT_DIR=$OUTPUT_DIR_BASE/${TASK_NAME}/${TASK_NAME}_${MUXING}_${DEMUXING}_${NUM_INSTANCES}_norm_${RANDOM_ENCODING_NORM}_rc_${RETRIEVAL_LOSS_COEFF}_lr${LEARNING_RATE}_tc_${TASK_LOSS_COEFF}_learntmuxing
     RUN_NAME=${CONFIG_NAME}_${TASK_NAME}_${MODEL_PATH}_${MUXING}_${DEMUXING}_${NUM_INSTANCES}_${RETRIEVAL_PERCENTAGE}_norm_${RANDOM_ENCODING_NORM}_rc_${RETRIEVAL_LOSS_COEFF}_lr${LEARNING_RATE}_tc_${TASK_LOSS_COEFF}_learnmuxing
 else
-    OUTPUT_DIR=$OUTPUT_DIR_BASE/${TASK_NAME}_${MUXING}_${DEMUXING}_${NUM_INSTANCES}_norm_${RANDOM_ENCODING_NORM}_rc_${RETRIEVAL_LOSS_COEFF}_lr${LEARNING_RATE}_tc_${TASK_LOSS_COEFF}
+    OUTPUT_DIR=$OUTPUT_DIR_BASE/${TASK_NAME}/${TASK_NAME}_${MUXING}_${DEMUXING}_${NUM_INSTANCES}_norm_${RANDOM_ENCODING_NORM}_rc_${RETRIEVAL_LOSS_COEFF}_lr${LEARNING_RATE}_tc_${TASK_LOSS_COEFF}
     RUN_NAME=${CONFIG_NAME}_${TASK_NAME}_${MODEL_PATH}_${MUXING}_${DEMUXING}_${NUM_INSTANCES}_${RETRIEVAL_PERCENTAGE}_norm_${RANDOM_ENCODING_NORM}_rc_${RETRIEVAL_LOSS_COEFF}_lr${LEARNING_RATE}_tc_${TASK_LOSS_COEFF}
 fi
 
@@ -343,15 +345,15 @@ CMD="python run_glue_inversion.py \
 --gaussian_hadamard_norm ${RANDOM_ENCODING_NORM} \
 --gradient_accumulation_steps ${GRADIENT_ACCUMULATION} \
 --learn_muxing ${LEARN_MUXING} \
---load_best_model_at_end 1 \
 --fp16 \
---metric_for_best_model ${BEST_METRIC} \
 --num_hidden_demux_layers 3 \
 --save_total_limit 1 \
 --epsilon $EPSILON \
 --add_embedding_noise $ADD_EMBEDDING_NOISE \
 --train_inversion_model $TRAIN_INVERSION_MODEL \
 --eval_with_knn_attack $EVAL_WITH_KNN_ATTACK"
+# --metric_for_best_model ${BEST_METRIC} \
+# --load_best_model_at_end 1 \
 if [ "$DO_TRAIN" -eq 1 ]; then
         CMD="${CMD} --do_train"
 fi

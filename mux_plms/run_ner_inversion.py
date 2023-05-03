@@ -88,11 +88,11 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
     select_strategy = 'None' # [ similar, far, random, base]
     batch_size = batch['input_ids'].size()[0]
     emb = model.bert.embeddings.word_embeddings.weight
-    emb_dataset = emb[dataset_word_dict]
     dataset_word_dict = torch.tensor(dataset_word_dict)
     if select_strategy == 'similar' or select_strategy=='far':
         largest = True if select_strategy=='far' else False
         real_sentence_embedding = model.bert.embeddings(input_ids=batch['input_ids'][real_sentence_idx].unsqueeze(0))
+        emb_dataset = emb[dataset_word_dict]
         ed = torch.cdist(real_sentence_embedding, emb_dataset, p=2.0) # (samples, embeddings)
         candidate_token_ids_top100_idx = torch.topk(ed, 100, largest=largest)[1] # (samples, topk)
         candidate_token_ids_top100 = dataset_word_dict[candidate_token_ids_top100_idx.view(-1)]
@@ -163,8 +163,8 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
                 all_hidden_states.append(hidden_states)
             input_ids = batch['input_ids'].to('cpu')
             attention_mask = batch['attention_mask'].to('cpu')
-            # target_hidden_states = torch.cat(all_hidden_states, dim=0).to('cpu')
-            target_hidden_states = torch.stack(all_hidden_states).to('cpu')
+            target_hidden_states = torch.cat(all_hidden_states, dim=0).to('cpu')
+            # target_hidden_states = torch.stack(all_hidden_states).to('cpu')
             all_mux_sentence_input_ids = torch.stack(all_mux_sentence_input_ids)
             features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask, 'mux_sentence_input_ids': all_mux_sentence_input_ids})
         pro_bar.update(1)
@@ -456,8 +456,8 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, label
             
         # evaluate
         all_predictions = torch.stack(all_predictions)
-        # all_hidden_states = torch.cat(all_hidden_states, dim=0)
-        all_hidden_states = torch.stack(all_hidden_states)
+        all_hidden_states = torch.cat(all_hidden_states, dim=0)
+        # all_hidden_states = torch.stack(all_hidden_states)
         labels = batch["labels"]
         preds, refs = get_labels(all_predictions, labels, label_list)
         metric.add_batch(
@@ -862,6 +862,48 @@ def main():
     else:
         label_list = get_label_list(raw_datasets["train"][label_column_name])
         label_to_id = {l: i for i, l in enumerate(label_list)}
+        
+    if 'ontonotes' in data_args.dataset_name:
+        label_to_id = {
+        "O": 0,
+        "B-CARDINAL": 1,
+        "B-DATE": 2,
+        "I-DATE": 3,
+        "B-PERSON": 4,
+        "I-PERSON": 5,
+        "B-NORP": 6,
+        "B-GPE": 7,
+        "I-GPE": 8,
+        "B-LAW": 9,
+        "I-LAW": 10,
+        "B-ORG": 11,
+        "I-ORG": 12, 
+        "B-PERCENT": 13,
+        "I-PERCENT": 14, 
+        "B-ORDINAL": 15, 
+        "B-MONEY": 16, 
+        "I-MONEY": 17, 
+        "B-WORK_OF_ART": 18, 
+        "I-WORK_OF_ART": 19, 
+        "B-FAC": 20, 
+        "B-TIME": 21, 
+        "I-CARDINAL": 22, 
+        "B-LOC": 23, 
+        "B-QUANTITY": 24, 
+        "I-QUANTITY": 25, 
+        "I-NORP": 26, 
+        "I-LOC": 27, 
+        "B-PRODUCT": 28, 
+        "I-TIME": 29, 
+        "B-EVENT": 30,
+        "I-EVENT": 31,
+        "I-FAC": 32,
+        "B-LANGUAGE": 33,
+        "I-PRODUCT": 34,
+        "I-ORDINAL": 35,
+        "I-LANGUAGE": 36
+    }
+        label_list = list(label_to_id.keys())
     num_labels = len(label_list)
 
     # Map that sends B-Xxx label to its I-Xxx counterpart
@@ -975,6 +1017,8 @@ def main():
         )
         labels = []
         for i, label in enumerate(examples[label_column_name]):
+            if 'ontonotes' in data_args.dataset_name:
+                label = [model.config.id2label[item] for item in label]
             word_ids = tokenized_inputs.word_ids(batch_index=i)
             previous_word_idx = None
             label_ids = []
@@ -1089,7 +1133,7 @@ def main():
             }
     # use wandb
     if model_args.use_wandb:
-        project_name = f'muxplm_{data_args.task_name}_mux{config.num_instances}'
+        project_name = f'muxplm_{data_args.dataset_name}_mux{config.num_instances}' if 'ontonotes' not in data_args.dataset_name else f'muxplm_ontonotes_mux{config.num_instances}'
         wandb.init(config=config, project=project_name, entity='privacy_cluster', name=model_args.wandb_name, sync_tensorboard=False,
                 job_type="CleanRepo", settings=wandb.Settings(start_method='fork'))
     # Initialize our Trainer

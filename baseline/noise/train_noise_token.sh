@@ -1,18 +1,18 @@
-GPU=2
+GPU=5
 MODEL=bert-base-uncased
 
 for EPSILON in 0.1 0.5 1 2 5 # {0.05, 0.1, 0.5, 1, 5}
 do
 for NU in 0.3 # {-1, 0.1, 0.3, 0.5, 0.8}
 do
-WANDB_NAME=noise_conll2003_epsilon${EPSILON}_nu${NU}
+WANDB_NAME=noise_ontonotes_epsilon${EPSILON}_nu${NU}
 MODEL_DIR=${WANDB_NAME}
-OUTPUT_DIR=/root/mixup/baseline/noise/ckpts/conll2003/${MODEL_DIR}
+OUTPUT_DIR=/root/mixup/baseline/noise/ckpts/ontonotes/${MODEL_DIR}
 
 CUDA_VISIBLE_DEVICES=$GPU python train_noise_token.py \
   --model_name_or_path $MODEL \
   --output_dir $OUTPUT_DIR \
-  --dataset_name conll2003 \
+  --dataset_name tner/ontonotes5 \
   --learning_rate 5e-5 \
   --per_device_train_batch_size 32 \
   --train_task_model \

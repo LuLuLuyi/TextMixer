@@ -85,7 +85,7 @@ class InversionPLM(nn.Module):
         return logits, pred
 
 def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict): 
-    select_strategy = 'None' # [ similar, far, random, base]
+    select_strategy = 'all_random' # [ similar, far, random, base]
     batch_size = batch['input_ids'].size()[0]
     emb = model.bert.embeddings.word_embeddings.weight
     dataset_word_dict = torch.tensor(dataset_word_dict)
@@ -103,6 +103,9 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
         # 真实句子的词不进行替换操作
         invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
         # 生成待替换词的随机下标
         selection_ids = torch.randint(low=1, high=100, size=batch['input_ids'][invalid_ids].size()).unsqueeze(1).to('cuda')
         selection_tokens = torch.gather(input=candidate_token_ids_top100[invalid_ids], dim=1, index=selection_ids)
@@ -113,10 +116,25 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
         # 真实句子的词不进行替换操作
         invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
         # 生成待替换词的随机下标
         selection_ids = torch.randint(low=0, high=len(dataset_word_dict)-1, size=batch['input_ids'][invalid_ids].size())
         selection_tokens = dataset_word_dict[selection_ids].to('cuda')
         batch['input_ids'][invalid_ids] = selection_tokens
+    elif select_strategy == 'all_random':
+        # 筛选出要替换的词
+        invalid_ids = (batch['attention_mask'] == 0)
+        invalid_ids = True
+        # 真实句子的词不进行替换操作
+        invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
+        # 生成待替换词的随机下标
+        selection_ids = torch.randint(low=0, high=len(dataset_word_dict)-1, size=batch['input_ids'][invalid_ids].size())
+        selection_tokens = dataset_word_dict[selection_ids].to('cuda')
     else:
         pass
     return batch
@@ -190,6 +208,41 @@ def get_dataset_word_dict(train_dataloader, eval_dataloader):
                 word_set.add(batch['input_ids'][seq_idx][word_idx].item())
     word_set = sorted(list(word_set))
     return word_set
+
+def dataset_statistic(train_dataloader, eval_dataloader, dataset_name, tokenizer):
+    stat_result_path = f'/root/mixup/mux_plms/dataset_stat/{dataset_name}'
+    if not os.path.exists(stat_result_path):
+        os.makedirs(stat_result_path)
+    tokens_dict = {}
+    sentence_length_list = []
+    for batch in tqdm(train_dataloader):
+        batch_size, seq_length = batch['input_ids'].size()
+        for seq_idx in range(batch_size):
+            sentence_length = list(batch['input_ids'][seq_idx]).index(102)
+            sentence_length_list.append(sentence_length)
+            for word_idx in range(seq_length):
+                token = tokenizer.decode(batch['input_ids'][seq_idx][word_idx])
+                tokens_dict[token] = tokens_dict.get(token, 0) + 1
+    for batch in tqdm(eval_dataloader):
+        batch_size, seq_length = batch['input_ids'].size()
+        for seq_idx in range(batch_size):
+            sentence_length = list(batch['input_ids'][seq_idx]).index(102)
+            sentence_length_list.append(sentence_length)
+            for word_idx in range(seq_length):
+                token = tokenizer.decode(batch['input_ids'][seq_idx][word_idx])
+                tokens_dict[token] = tokens_dict.get(token, 0) + 1
+    tokens_dict = sorted(tokens_dict.items(), key=lambda x: x[1], reverse=True)
+    with open(os.path.join(stat_result_path, f'token_stat.txt'),'w') as f:
+        token_num = len(tokens_dict.keys())
+        f.write(f'dataset total tokens: {token_num}\n')
+        for (key, value) in tokens_dict:
+            f.write(f'{key:<15s}: {value}\n')
+    with open(os.path.join(stat_result_path, f'sentence_stat.txt'),'w') as f:
+        seq_mean_length = sum(sentence_length_list) / len(sentence_length_list)
+        f.write(f'dataset mean sequence length: {seq_mean_length}\n')
+        for seq_len in sentence_length_list:
+            f.write(f'{seq_len}\n')
+        
 
 def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True):
     # batch_size=32 # {roberta:32, mlp:64}
@@ -748,7 +801,9 @@ class ModelArguments:
     train_inversion_model: bool = field(
         default=False,
     )
-
+    do_dataset_statistic: bool = field(
+        default=False,
+    )
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -1244,6 +1299,8 @@ def main():
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=60, drop_last=True)
     torch.cuda.empty_cache()
+    if model_args.do_dataset_statistic:
+        dataset_statistic(train_dataloader, eval_dataloader, data_args.dataset_name, tokenizer)
     if model_args.eval_with_knn_attack:
         print('statistic dataset word dict')
         dataset_word_dict = get_dataset_word_dict(train_dataloader, eval_dataloader)

@@ -101,7 +101,7 @@ class InversionPLM(nn.Module):
         return logits, pred
 
 def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict): 
-    select_strategy = 'None' # [ similar, far, random]
+    select_strategy = 'all_random' # [ similar, far, random]
     batch_size, sequence_length = batch['input_ids'].size()
     emb = model.bert.embeddings.word_embeddings.weight
     dataset_word_dict = torch.tensor(dataset_word_dict)
@@ -139,6 +139,18 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         selection_ids = torch.randint(low=0, high=len(dataset_word_dict)-1, size=batch['input_ids'][invalid_ids].size())
         selection_tokens = dataset_word_dict[selection_ids].to('cuda')
         batch['input_ids'][invalid_ids] = selection_tokens
+    elif select_strategy == 'all_random':
+        # 筛选出要替换的词
+        invalid_ids = (batch['attention_mask'] == 0)
+        invalid_ids = True
+        # 真实句子的词不进行替换操作
+        invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
+        # 生成待替换词的随机下标
+        selection_ids = torch.randint(low=0, high=len(dataset_word_dict)-1, size=batch['input_ids'][invalid_ids].size())
+        selection_tokens = dataset_word_dict[selection_ids].to('cuda')
     elif select_strategy == 'self_filling':
         # 筛选出要替换的词
         invalid_ids = (batch['attention_mask'] == 0)

@@ -243,6 +243,7 @@ task2numstepsmap[cola]=10000
 task2numstepsmap[stsb]=10000
 task2numstepsmap[mrpc]=10000
 task2numstepsmap[imdb]=10000
+task2numstepsmap[ag_news]=40000
 
 declare -A task2numevalstepsmap
 task2numevalstepsmap[mnli]=5000
@@ -255,12 +256,16 @@ task2numevalstepsmap[cola]=500
 task2numevalstepsmap[stsb]=500
 task2numevalstepsmap[mrpc]=500
 task2numevalstepsmap[imdb]=1000
+task2numevalstepsmap[ag_news]=4000
 
 BEST_METRIC=${task2bestmetricmap[$TASK_NAME]}
 NUM_TRAIN_STEPS=${task2numstepsmap[$TASK_NAME]}
 NUM_EVAL_STEPS=${task2numevalstepsmap[$TASK_NAME]}
 # other miscelleneous params
 MAX_SEQ_LENGTH=128
+if [ "$TASK_NAME" = "imdb" ]; then
+    MAX_SEQ_LENGTH=448
+fi
 
 if [ "$SETTING" = "finetuning" ]; then
 

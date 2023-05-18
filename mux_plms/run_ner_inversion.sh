@@ -175,6 +175,14 @@ while :; do
                 die 'ERROR: "--wandb_name" requires a non-empty option argument.'
             fi
             ;;
+        --select_strategy)
+            if [ "$2" ]; then
+                SELECT_STRATEGY=$2
+                shift
+            else
+                die 'ERROR: "--wandb_name" requires a non-empty option argument.'
+            fi
+            ;;
 
          --gradient_accumulation)
             if [ "$2" ]; then
@@ -340,7 +348,8 @@ CMD="python run_ner_inversion.py \
 --epsilon $EPSILON \
 --add_embedding_noise $ADD_EMBEDDING_NOISE \
 --train_inversion_model $TRAIN_INVERSION_MODEL \
---eval_with_knn_attack $EVAL_WITH_KNN_ATTACK"
+--eval_with_knn_attack $EVAL_WITH_KNN_ATTACK \
+--select_strategy $SELECT_STRATEGY"
 if [ "$DO_TRAIN" -eq 1 ]; then
         CMD="${CMD} --do_train"
 fi

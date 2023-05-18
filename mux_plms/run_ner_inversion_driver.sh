@@ -45,7 +45,7 @@ for CONFIG_TYPE in ${CONFIG_TYPES[@]}; do
                 --train_inversion_model True \
                 --add_embedding_noise True \
                 --epsilon $EPSILON \
-                --wandb_name ontonotes_mux${NUM_SENTENCES}_embedding_noise_eps${EPSILON}"
+                --wandb_name ontonotes_mux${NUM_SENTENCES}_embedding_noise_eps${EPSILON} \"
                 if [ $USE_SLURM -eq 1 ]; then
                     sbatch -A allcs --time=12:00:00 --mem=32G --output=logs/%x-%j.out --job-name=${TASK_NAME}_${MODEL_TYPE}_${NUM_SENTENCES}_${CONFIG_TYPE} --gres=gpu:a5000:1 ./run_job.sh "$CMD"
                 else

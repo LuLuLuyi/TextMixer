@@ -72,6 +72,7 @@ task_to_keys = {
     "rte": ("sentence1", "sentence2"),
     "sst2": ("sentence", None),
     "imdb": ("text", None),
+    "ag_news":("text", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
 }
@@ -101,7 +102,7 @@ class InversionPLM(nn.Module):
         return logits, pred
 
 def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict): 
-    select_strategy = 'all_random' # [ similar, far, random]
+    select_strategy = 'None' # [ similar, far, random]
     batch_size, sequence_length = batch['input_ids'].size()
     emb = model.bert.embeddings.word_embeddings.weight
     dataset_word_dict = torch.tensor(dataset_word_dict)
@@ -169,20 +170,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         # 把假句子用自身填满
         filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
         batch['input_ids'][invalid_ids] = filled_input_ids[invalid_ids]
-    elif select_strategy == "cluster":
-        token_embeddings = model.bert.embeddings.word_embeddings.weight.cpu().detach().numpy()
-        clusters = KMeans(n_clusters=100, random_state=0).fit(token_embeddings)
-        token_embeddings_cluster_ids = clusters.predict(token_embeddings)
-        cluster_center = torch.tensor(clusters.cluster_centers_).to(model.device)
-        token2cluster = {}
-        clusters2token_list = {}
-        for token_embeddings_ids, cluster_ids in enumerate(token_embeddings_cluster_ids):
-            token2cluster[token_embeddings_ids] = cluster_ids.item()
-            if cluster_ids not in clusters2token_list:
-                clusters2token_list[cluster_ids] = []
-            clusters2token_list[cluster_ids].extend(token_embeddings_ids)
-            # cluster_center = torch.tensor(clusters.cluster_centers_).to(model.device)
-        # cluster2token_list
+    else:
         pass     
         
         
@@ -813,6 +801,8 @@ def main():
         # Downloading and loading a dataset from the hub.
         if data_args.task_name == "imdb":
             datasets = load_dataset("imdb")
+        elif data_args.task_name == "ag_news":
+            datasets = load_dataset("ag_news")
         else:
             datasets = load_dataset(
                 "glue", data_args.task_name, cache_dir=model_args.cache_dir
@@ -1054,7 +1044,7 @@ def main():
     # if "validation" not in datasets and "validation_matched" not in datasets:
     #     raise ValueError("--do_eval requires a validation dataset")
     eval_dataset = datasets[
-        "test" if data_args.task_name == "imdb" else "validation"
+        "test" if data_args.task_name == "imdb" or data_args.task_name == "ag_news" else "validation"
     ]
     if data_args.max_eval_samples is not None:
         eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
@@ -1081,7 +1071,7 @@ def main():
 
     # Get the metric function
     if data_args.task_name is not None:
-        if data_args.task_name == "imdb":
+        if data_args.task_name == "imdb" or data_args.task_name == "ag_news":
             metric = evaluate.load("accuracy")
         else:
             metric = evaluate.load("glue", data_args.task_name)

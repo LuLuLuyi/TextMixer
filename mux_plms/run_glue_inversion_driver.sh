@@ -1,4 +1,4 @@
-GPU=3
+GPU=7
 USE_SLURM=0
 MUXING="gaussian_hadamard"
 DEMUXING="index_pos"
@@ -8,7 +8,7 @@ NUM_SENTENCES_LIST=(10)
 # MODEL_TYPE="electra"
 MODEL_TYPE="bert"
 # TASK_NAMES=("pos" "qnli" "ner")
-TASK_NAMES=("qqp")
+TASK_NAMES=("ag_news")
 EPSILON=(1) # 1 0.5 0.4 0.2 0.167 0.142 0.125
 # CONFIG_TYPES=("base" "large" "small")
 CONFIG_TYPES=("base")

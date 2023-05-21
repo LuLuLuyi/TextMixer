@@ -246,7 +246,7 @@ def get_dataset_word_dict(train_dataloader, eval_dataloader):
     word_set = sorted(list(word_set))
     return word_set
 
-def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True):
+def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True, output_dir=None):
     # batch_size=32 # {roberta:32, mlp:64}
     learning_rate=2e-5 # {roberta:1e-5 2e-5 5e-5, mlp:2e-4}
     device='cuda'
@@ -279,6 +279,10 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     model_attack_acc = 0
     hit_tokens = {}
     mux_tokens_list = []
+    # best
+    best_top1_acc = 0
+    best_top5_acc = 0
+    best_rouge = 0
     print('################# start train inversion model #################')
     for epoch in range(epochs):
         for step, batch in enumerate(train_dataloader):
@@ -307,8 +311,63 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
             completed_steps += 1
             progress_bar.update(1)
             progress_bar.set_description('inversion_model_loss:{}'.format(loss.item()))
-
+            
         if (epoch+1) %4 == 0:
+            with torch.no_grad():
+                # hit
+                rouge_hit_cnt = 0
+                top1_hit_cnt = 0
+                top5_hit_cnt = 0
+                # total
+                total_cnt = 0
+                rouge_total_cnt = 0
+                for batch in eval_dataloader:
+                    batch = {key:value.to(device) for key,value in batch.items()}
+                    target_hidden_states = batch['hidden_states']
+                    
+                    eval_label = batch['input_ids']
+                    attention_mask = batch['attention_mask']
+
+                    feature = target_hidden_states
+                    feature = feature.to(device)
+                    attention_mask = attention_mask.to(device)
+                    pred_logits, preds = inversion_model.predict(feature, attention_mask=attention_mask)
+
+                    valid_ids = attention_mask!=0
+                    valid_ids[word_filter(eval_label, filter_tokens)] = False
+                    eval_label = batch['input_ids']
+                    eval_label = eval_label[valid_ids] 
+                    # inversion top1
+                    top1_preds = torch.topk(pred_logits, k=1)[1]
+                    top1_preds = top1_preds[valid_ids]
+                    top1_hit_cnt += (eval_label.unsqueeze(1) == top1_preds).int().sum().item()
+                    # inversion top5
+                    top5_preds = torch.topk(pred_logits, k=5)[1]
+                    top5_preds = top5_preds[valid_ids]
+                    top5_hit_cnt += (eval_label.unsqueeze(1) == top5_preds).int().sum().item()
+                    total_cnt += eval_label.shape[0]
+                    # rouge
+                    r_hit_cnt, r_total_cnt = rouge(eval_label.unsqueeze(1), top1_preds, tokenizer)
+                    rouge_hit_cnt += r_hit_cnt
+                    rouge_total_cnt += r_total_cnt
+                # caculate attack accuracy
+                top1_model_attack_acc = top1_hit_cnt/total_cnt
+                top5_model_attack_acc = top5_hit_cnt/total_cnt
+                rouge_acc = rouge_hit_cnt / rouge_total_cnt
+                print('eval inversion top1 attack acc:{}'.format(top1_model_attack_acc))
+                if use_wandb:
+                    wandb.log({'eval/inversion_model_top1_acc': top1_model_attack_acc})
+                    wandb.log({'eval/inversion_model_top5_acc': top5_model_attack_acc})
+                    wandb.log({'eval/inversion_model_rouge_acc': rouge_acc})
+                # record the best
+                if top1_model_attack_acc > best_top1_acc:
+                    best_top1_acc = top1_model_attack_acc
+                if top5_model_attack_acc > best_top5_acc:
+                    best_top5_acc = top5_model_attack_acc
+                if rouge_acc > best_rouge:
+                    best_rouge = rouge_acc
+
+        if epoch == epochs - 1:
             with torch.no_grad():
                 hit_cnt = 0
                 total_cnt = 0
@@ -358,8 +417,6 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                             for rec_idx in range(config.num_instances):
                                 f.write(f"{f'recover_token{rec_idx}':<20s}")
                             f.write('\n')
-                            # f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
-                            # f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")
                             for word_idx in range(0, batch['input_ids'].size()[1]):
                                 if valid_ids[seq_idx][word_idx]:
                                     f.write(f"{tokenizer.decode(batch['input_ids'][seq_idx][word_idx]):<20s} | ")
@@ -377,10 +434,10 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                                     f.write("\n")
                             f.write(f'-----------------------------muxplm-{config.task_name}-{config.num_instances} case end-----------------------------\n')
                             f.write('\n')
-                model_attack_acc = hit_cnt/total_cnt
-                print('attack acc:{}'.format(hit_cnt/total_cnt))
-                if use_wandb:
-                    wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
+                # model_attack_acc = hit_cnt/total_cnt
+                # print('attack acc:{}'.format(hit_cnt/total_cnt))
+                # if use_wandb:
+                #     wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
     
     with open(os.path.join(case_study_path, 'hit_tokens_stat.txt'),'w') as f:
         hit_tokens = sorted(hit_tokens.items(), key=lambda x: x[1], reverse=True)
@@ -403,7 +460,16 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
             for mux_token in key:
                 f.write(f"{mux_token:<15s}")
             f.write('\n')
-    # torch.save(model, 'mux_plms/ckpts/sst2/datamux-sst2-10/inversion_model_token_shuffle.pt')
+    # log the best
+    print(f'best_inversion_model_top1_acc:{best_top1_acc}')
+    print(f'best_inversion_model_top5_acc:{best_top5_acc}')
+    print(f'best_inversion_model_rouge:{best_rouge}')
+    if use_wandb:
+        wandb.log({'best/best_inversion_model_top1_acc': best_top1_acc})
+        wandb.log({'best/best_inversion_model_top5_acc': best_top5_acc})
+        wandb.log({'best/best_inversion_model_rouge_acc': best_rouge})
+    # save inversion model
+    torch.save(inversion_model, os.path.join(output_dir,'inversion_model.pt'))
     return model_attack_acc
 
 def rouge(input_ids, pred_ids, tokenizer):

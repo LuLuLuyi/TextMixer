@@ -247,7 +247,7 @@ task2numstepsmap[ag_news]=40000
 
 declare -A task2numevalstepsmap
 task2numevalstepsmap[mnli]=5000
-task2numevalstepsmap[qqp]=5000
+task2numevalstepsmap[qqp]=10000
 task2numevalstepsmap[rte]=100
 task2numevalstepsmap[wnli]=100
 task2numevalstepsmap[qnli]=5000

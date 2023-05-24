@@ -1284,7 +1284,7 @@ def main():
             for key,value in eval_metric.items():
                 wandb.log({f'metric/{key}':value})
     if model_args.train_inversion_model:
-        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, model_args.use_wandb)
+        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, model_args.use_wandb, training_args.output_dir)
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)

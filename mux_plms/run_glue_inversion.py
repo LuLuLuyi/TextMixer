@@ -104,7 +104,7 @@ class InversionPLM(nn.Module):
         return logits, pred
 
 def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict, select_strategy='None',  token2cluster=None, clusters2token_list=None): 
-    batch_size = batch['input_ids'].size()[0]
+    batch_size, sequence_length = batch['input_ids'].size()
     emb = model.bert.embeddings.word_embeddings.weight
     dataset_word_dict = torch.tensor(dataset_word_dict)
     if select_strategy == 'similar' or select_strategy=='far':

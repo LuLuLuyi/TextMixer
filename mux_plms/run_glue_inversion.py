@@ -60,6 +60,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
+import pickle
 from sklearn.cluster import KMeans
 
 
@@ -78,6 +79,7 @@ task_to_keys = {
 }
 
 logger = logging.getLogger(__name__)
+
 
 version_2_modelcls = {
     "electra": MuxedElectraForSequenceClassification,
@@ -101,9 +103,8 @@ class InversionPLM(nn.Module):
         pred = torch.argmax(F.softmax(logits,dim=-1), dim=2)
         return logits, pred
 
-def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict): 
-    select_strategy = 'None' # [ similar, far, random]
-    batch_size, sequence_length = batch['input_ids'].size()
+def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict, select_strategy='None',  token2cluster=None, clusters2token_list=None): 
+    batch_size = batch['input_ids'].size()[0]
     emb = model.bert.embeddings.word_embeddings.weight
     dataset_word_dict = torch.tensor(dataset_word_dict)
     if select_strategy == 'similar' or select_strategy=='far':
@@ -143,7 +144,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
     elif select_strategy == 'all_random':
         # 筛选出要替换的词
         invalid_ids = (batch['attention_mask'] == 0)
-        invalid_ids = True
+        invalid_ids[:,1:] = True
         # 真实句子的词不进行替换操作
         invalid_ids[real_sentence_idx] = False
         # 只对假句子长度不足的情况进行替换操作
@@ -152,6 +153,28 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         # 生成待替换词的随机下标
         selection_ids = torch.randint(low=0, high=len(dataset_word_dict)-1, size=batch['input_ids'][invalid_ids].size())
         selection_tokens = dataset_word_dict[selection_ids].to('cuda')
+        batch['input_ids'][invalid_ids] = selection_tokens
+    elif select_strategy == 'all_similar' or select_strategy=='all_far':
+        largest = True if select_strategy=='far' else False
+        real_sentence_embedding = model.bert.embeddings(input_ids=batch['input_ids'][real_sentence_idx].unsqueeze(0))
+        emb_dataset = emb[dataset_word_dict]
+        ed = torch.cdist(real_sentence_embedding, emb_dataset, p=2.0) # (samples, embeddings)
+        candidate_token_ids_top100_idx = torch.topk(ed, 100, largest=largest)[1] # (samples, topk)
+        candidate_token_ids_top100 = dataset_word_dict[candidate_token_ids_top100_idx.view(-1)]
+        candidate_token_ids_top100 = candidate_token_ids_top100.view(candidate_token_ids_top100_idx.size()[0], candidate_token_ids_top100_idx.size()[1], -1)
+        candidate_token_ids_top100 = candidate_token_ids_top100.repeat(batch_size,1,1).to('cuda')
+        # 筛选出要替换的词
+        invalid_ids = (batch['attention_mask'] == 0)
+        invalid_ids[:,1:] = True
+        # 真实句子的词不进行替换操作
+        invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
+        # 生成待替换词的随机下标
+        selection_ids = torch.randint(low=1, high=100, size=batch['input_ids'][invalid_ids].size()).unsqueeze(1).to('cuda')
+        selection_tokens = torch.gather(input=candidate_token_ids_top100[invalid_ids], dim=1, index=selection_ids)
+        batch['input_ids'][invalid_ids] = selection_tokens.squeeze(1)
     elif select_strategy == 'self_filling':
         # 筛选出要替换的词
         invalid_ids = (batch['attention_mask'] == 0)
@@ -170,15 +193,67 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         # 把假句子用自身填满
         filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
         batch['input_ids'][invalid_ids] = filled_input_ids[invalid_ids]
+    elif select_strategy=="cluster":
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        real_sentence = batch['input_ids'][real_sentence_idx]
+        for idx in range(1, real_sentence_length):
+            cur_token = real_sentence[idx]
+            # cluster sample
+            cluster_id = token2cluster[int(cur_token.item())]
+            cluster_sample_pool = clusters2token_list[cluster_id]
+            cluster_sample_pool_repeat = (batch_size-1) // len(cluster_sample_pool) + 1
+            if cluster_sample_pool_repeat > 1 :
+                cluster_sample_pool = [token for token in cluster_sample_pool for repeat_times in range(cluster_sample_pool_repeat)]
+            cluster_selected_tokens = random.sample(cluster_sample_pool, k=batch_size-1)
+            selected_tokens = cluster_selected_tokens
+            selected_tokens.insert(real_sentence_idx, cur_token)
+            selected_tokens = torch.tensor(selected_tokens)
+            batch['input_ids'][:,idx] = selected_tokens
+    elif select_strategy=="realsen":
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        real_sentence = batch['input_ids'][real_sentence_idx]
+        real_sentence_sample_num = batch_size-1 # [0, num_instances-1] or (batch_size-1) // 2
+        real_sentence_sample_pool_repeat = (real_sentence_sample_num // (real_sentence_length-1)) + 1
+        for idx in range(1, real_sentence_length):
+            cur_token = real_sentence[idx]
+            # real sentence sample
+            real_sentence_sample_pool = list(real_sentence[1:real_sentence_length].repeat(real_sentence_sample_pool_repeat))
+            real_sentence_sample_pool.remove(cur_token)
+            real_sentence_selected_tokens = random.sample(real_sentence_sample_pool, k=real_sentence_sample_num)
+            selected_tokens = real_sentence_selected_tokens
+            selected_tokens.insert(real_sentence_idx, cur_token)
+            selected_tokens = torch.tensor(selected_tokens)
+            batch['input_ids'][:,idx] = selected_tokens
+    elif select_strategy=="cluster_realsen":
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        real_sentence = batch['input_ids'][real_sentence_idx]
+        real_sentence_sample_num = 4 # [0, num_instances-1] or (batch_size-1) // 2
+        real_sentence_sample_pool_repeat = (real_sentence_sample_num // (real_sentence_length-1)) + 1
+        for idx in range(1, real_sentence_length):
+            cur_token = real_sentence[idx]
+            # real sentence sample
+            real_sentence_sample_pool = list(real_sentence[1:real_sentence_length].repeat(real_sentence_sample_pool_repeat))
+            real_sentence_sample_pool.remove(cur_token)
+            real_sentence_selected_tokens = random.sample(real_sentence_sample_pool, k=real_sentence_sample_num)
+            # cluster sample
+            cluster_id = token2cluster[int(cur_token.item())]
+            cluster_sample_pool = clusters2token_list[cluster_id]
+            # cluster_sample_pool.remove(int(cur_token.item()))
+            if len(cluster_sample_pool) < batch_size-1-real_sentence_sample_num:
+                cluster_sample_pool+=real_sentence_sample_pool
+            cluster_selected_tokens = random.sample(cluster_sample_pool, k=batch_size-1-real_sentence_sample_num)
+            selected_tokens = cluster_selected_tokens + real_sentence_selected_tokens
+            random.shuffle(selected_tokens)
+            selected_tokens.insert(real_sentence_idx, cur_token)
+            selected_tokens = torch.tensor(selected_tokens)
+            batch['input_ids'][:,idx] = selected_tokens
     else:
-        pass     
-        
-        
-        
+        pass
     return batch
     
-def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_dict, target_layer=3, device='cuda'):
-    token_shuffle = True
+def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_dict, select_strategy, task_name, target_layer=3, device='cuda'):
+    token2cluster = None
+    clusters2token_list = None
     features = []
     pro_bar = tqdm(range(len(dataloader)))
     model.eval()
@@ -186,6 +261,17 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
     special_tokens = tokenizer.convert_tokens_to_ids(['[PAD]','[SEP]'])
     simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':','the','a','of','and','s','to','it','is','that','in','as','on'])
     filter_tokens = list(set(special_tokens + simple_tokens))
+    if "cluster" in select_strategy:
+        dataset_word_num = len(dataset_word_dict)
+        n_clusters = dataset_word_num // (num_instances * 10)
+        # save result
+        cluster_dir = f'kmeans_cluster_num{n_clusters}'
+        cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{task_name}', cluster_dir)
+        with open(f'{cluster_path}/{cluster_dir}_token2cluster.pickle',"rb") as f:
+            token2cluster = pickle.load(f)
+        with open(f'{cluster_path}/{cluster_dir}_clusters2token_list.pickle',"rb") as f:
+            clusters2token_list = pickle.load(f)
+        
     for batch in dataloader:
         with torch.no_grad():
             if 'idx' in batch.keys():
@@ -206,13 +292,9 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
                 # mux_sentence_ids.insert(real_sentence_idx, idx)
                 
                 mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}
-                mux_minibatch = mux_token_selection(model, filter_tokens, mux_minibatch, real_sentence_idx, dataset_word_dict)
+                if select_strategy is not 'None':
+                    mux_minibatch = mux_token_selection(model, filter_tokens, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
                 mux_minibatch['real_sentence_idx'] = real_sentence_idx
-                # token shuffle
-                # if token_shuffle:
-                #     for idx in range(sequence_length):
-                #         shuffled_idx = random.sample(range(0,10), 10)
-                #         mux_minibatch['input_ids'][:, idx] = mux_minibatch['input_ids'][shuffled_idx, idx]
                 outputs = model(**mux_minibatch)
                 hidden_states = outputs.hidden_states
                 all_mux_sentence_input_ids.append(mux_minibatch['input_ids'])
@@ -231,22 +313,18 @@ def word_filter(eval_label, filter_list):
         allow_token_ids = allow_token_ids | (eval_label == item)
     return allow_token_ids
 
-def get_dataset_word_dict(train_dataloader, eval_dataloader):
+def get_dataset_word_dict(train_dataset, eval_dataset):
     word_set = set()
-    for batch in tqdm(train_dataloader):
-        batch_size, seq_length = batch['input_ids'].size()
-        for seq_idx in range(batch_size):
-            for word_idx in range(seq_length):
-                word_set.add(batch['input_ids'][seq_idx][word_idx].item())
-    for batch in tqdm(eval_dataloader):
-        batch_size, seq_length = batch['input_ids'].size()
-        for seq_idx in range(batch_size):
-            for word_idx in range(seq_length):
-                word_set.add(batch['input_ids'][seq_idx][word_idx].item())
+    for sentence in train_dataset['input_ids']:
+        for token in sentence:
+            word_set.add(token)
+    for sentence in eval_dataset['input_ids']:
+        for token in sentence:
+            word_set.add(token)
     word_set = sorted(list(word_set))
     return word_set
 
-def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, use_wandb=True, output_dir=None):
+def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, use_wandb=True, output_dir=None):
     # batch_size=32 # {roberta:32, mlp:64}
     learning_rate=2e-5 # {roberta:1e-5 2e-5 5e-5, mlp:2e-4}
     device='cuda'
@@ -258,23 +336,21 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     model = model.to(device)
     
     optimizer = torch.optim.AdamW(inversion_model.parameters(), lr=learning_rate)
-    
-    print('statistic dataset word dict')
-    dataset_word_dict = get_dataset_word_dict(train_dataloader, eval_dataloader)
-    print('done')
-    
+
     print('load dataloader to memory')
-    train_dataloader = dataloader2memory(train_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.target_layer, device)
-    eval_dataloader = dataloader2memory(eval_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.target_layer, device)
+    train_dataloader = dataloader2memory(train_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.select_strategy, config.task_name, config.target_layer, device)
+    eval_dataloader = dataloader2memory(eval_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.select_strategy, config.task_name, config.target_layer, device)
     print('done')
     
     total_step = len(train_dataloader) * epochs
     
     progress_bar = tqdm(range(total_step))
     special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
+    # filted inversion
+    # simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':','the','a','t','n','?','%','of','and','s','to','is','was','for','that','in','as','on'])
+    # origin inversion
     simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
     filter_tokens = list(set(special_tokens + simple_tokens))
-    
     completed_steps = 0
     model_attack_acc = 0
     hit_tokens = {}
@@ -492,6 +568,19 @@ def rouge(input_ids, pred_ids, tokenizer):
 def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, dataset_word_dict):
     emb = model.bert.embeddings.word_embeddings.weight
     device = 'cuda'
+    select_strategy = config.select_strategy
+    token2cluster = None
+    clusters2token_list = None
+    if "cluster" in select_strategy:
+        dataset_word_num = len(dataset_word_dict)
+        n_clusters = dataset_word_num // (config.num_instances * 10)
+        # save result
+        cluster_dir = f'kmeans_cluster_num{n_clusters}'
+        cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{config.dataset_name}', cluster_dir)
+        with open(f'{cluster_path}/{cluster_dir}_token2cluster.pickle',"rb") as f:
+            token2cluster = pickle.load(f)
+        with open(f'{cluster_path}/{cluster_dir}_clusters2token_list.pickle',"rb") as f:
+            clusters2token_list = pickle.load(f)
     model.eval()
     # hit
     top1_hit_cnt = 0
@@ -527,7 +616,8 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, datas
                 # mux_sentence_ids.insert(real_sentence_idx, idx)
                 
                 mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}
-                mux_minibatch = mux_token_selection(model, filter_tokens_mux_token_selection, mux_minibatch, real_sentence_idx, dataset_word_dict)
+                if select_strategy is not 'None':
+                    mux_minibatch = mux_token_selection(model, filter_tokens_mux_token_selection, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
                 mux_minibatch['real_sentence_idx'] = real_sentence_idx 
                 outputs = model(**mux_minibatch)
                 hidden_states = outputs.hidden_states
@@ -570,7 +660,46 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, datas
     eval_metric['knn_rouge'] = rouge_hit_cnt/rouge_total_cnt
     return eval_metric
 
+def cluster_pipeline(model, dataset_word_dict, dataset_name, num_instances):
+    # get dataset embedding
+    emb = model.bert.embeddings.word_embeddings.weight.cpu().detach().numpy()
+    dataset_emb = emb[dataset_word_dict]
+    dataset_word_num = len(dataset_word_dict)
+    # clustering
+    print('clustering......')
+    import time
+    start_time = time.time()
+    n_clusters = dataset_word_num // (num_instances * 10)
+    clusters = KMeans(n_clusters=n_clusters, random_state=0).fit(dataset_emb)
+    dataset_emb_cluster_result = clusters.predict(dataset_emb)
+    print('clustering......done! cost {} seconds'.format(time.time()-start_time))
+    token2cluster = {}
+    clusters2token_list = {}
+    for dataset_token_ids, cluster_ids in enumerate(dataset_emb_cluster_result):
+        cluster_ids = int(cluster_ids.item())
+        token_input_ids = dataset_word_dict[dataset_token_ids]
+        token2cluster[token_input_ids] = cluster_ids
+        if cluster_ids not in clusters2token_list:
+            clusters2token_list[cluster_ids] = []
+        clusters2token_list[cluster_ids].append(token_input_ids)
+    # save result 
+    cluster_dir = f'kmeans_cluster_num{n_clusters}'
+    cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{dataset_name}', cluster_dir)
+    if not os.path.exists(cluster_path):
+        os.makedirs(cluster_path)        
+    unique, counts = np.unique(list(token2cluster.values()), return_counts=True)
+    plt.figure(figsize=(25, 10))
+    plt.bar(unique, counts)
+    plt.title(f'{cluster_dir} result statistics')
+    plt.xlabel('cluster center index')
+    plt.ylabel('num of tokens')
+    plt.savefig(f'{cluster_path}/{cluster_dir}_vis.png')
+    with open(f'{cluster_path}/{cluster_dir}_token2cluster.pickle',"wb") as f:
+        pickle.dump(token2cluster,f)
+    with open(f'{cluster_path}/{cluster_dir}_clusters2token_list.pickle',"wb") as f:
+        pickle.dump(clusters2token_list,f)
 
+    
 @dataclass
 class DataTrainingArguments:
     """
@@ -790,6 +919,9 @@ class ModelArguments:
     wandb_name: Optional[str] = field(
         default="mux_plm_default_wandb_name",
     )
+    select_strategy: Optional[str] = field(
+        default="None",
+    )
     use_wandb: bool = field(
         default=False,
     )
@@ -802,7 +934,9 @@ class ModelArguments:
     train_inversion_model: bool = field(
         default=False,
     )
-
+    do_cluster: bool = field(
+        default=False,
+    )
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -996,6 +1130,7 @@ def main():
     config.target_layer = 3
     config.wandb_name = model_args.wandb_name
     config.task_name = data_args.task_name
+    config.select_strategy = model_args.select_strategy
     
     model_path_supplied = model_args.model_name_or_path is not None
     if model_args.should_mux:
@@ -1274,17 +1409,19 @@ def main():
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=60, drop_last=True)
     torch.cuda.empty_cache()
+    print('statistic dataset word dict')
+    dataset_word_dict = get_dataset_word_dict(train_dataset, eval_dataset)
+    print('done')
+    if model_args.do_cluster:
+        cluster_pipeline(model, dataset_word_dict, data_args.dataset_name, config.num_instances)
     # set_seed(3)
     if model_args.eval_with_knn_attack:
-        print('statistic dataset word dict')
-        dataset_word_dict = get_dataset_word_dict(train_dataloader, eval_dataloader)
-        print('done')
         eval_metric = evaluate_with_knn_attack(model, eval_dataloader, tokenizer, metric, config, dataset_word_dict)
         if model_args.use_wandb:
             for key,value in eval_metric.items():
                 wandb.log({f'metric/{key}':value})
     if model_args.train_inversion_model:
-        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, model_args.use_wandb, training_args.output_dir)
+        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, model_args.use_wandb, training_args.output_dir)
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)

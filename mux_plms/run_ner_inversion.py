@@ -92,7 +92,6 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
     batch_size = batch['input_ids'].size()[0]
     emb = model.bert.embeddings.word_embeddings.weight
     dataset_word_dict = torch.tensor(dataset_word_dict)
-    device = 'cuda'
     if select_strategy == 'similar' or select_strategy=='far':
         largest = True if select_strategy=='far' else False
         real_sentence_embedding = model.bert.embeddings(input_ids=batch['input_ids'][real_sentence_idx].unsqueeze(0))
@@ -161,6 +160,24 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         selection_ids = torch.randint(low=1, high=100, size=batch['input_ids'][invalid_ids].size()).unsqueeze(1).to('cuda')
         selection_tokens = torch.gather(input=candidate_token_ids_top100[invalid_ids], dim=1, index=selection_ids)
         batch['input_ids'][invalid_ids] = selection_tokens.squeeze(1)
+    elif select_strategy == 'self_filling':
+        # 筛选出要替换的词
+        invalid_ids = (batch['attention_mask'] == 0)
+        invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
+        # 真实句子的词不进行替换操作
+        invalid_ids[real_sentence_idx] = False
+        # 只对假句子长度不足的情况进行替换操作
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        invalid_ids[:,real_sentence_length:] = False
+        # 生成填充的batch
+        filled_input_ids = torch.clone(batch['input_ids'])
+        for sequence_idx in range(batch_size):
+            sep_idx = list(batch['input_ids'][sequence_idx]).index(102)
+            for word_idx in range(sep_idx, sequence_length):
+                filled_input_ids[sequence_idx][word_idx] = batch['input_ids'][sequence_idx][word_idx%(sep_idx-1)+1]
+        # 把假句子用自身填满
+        filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
+        batch['input_ids'][invalid_ids] = filled_input_ids[invalid_ids]
     elif select_strategy=="cluster":
         real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
         real_sentence = batch['input_ids'][real_sentence_idx]
@@ -171,7 +188,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
             cluster_sample_pool = clusters2token_list[cluster_id]
             cluster_sample_pool_repeat = (batch_size-1) // len(cluster_sample_pool) + 1
             if cluster_sample_pool_repeat > 1 :
-                cluster_sample_pool = [token for token in cluster_sample_pool for i in range(cluster_sample_pool_repeat)]
+                cluster_sample_pool = [token for token in cluster_sample_pool for repeat_times in range(cluster_sample_pool_repeat)]
             cluster_selected_tokens = random.sample(cluster_sample_pool, k=batch_size-1)
             selected_tokens = cluster_selected_tokens
             selected_tokens.insert(real_sentence_idx, cur_token)
@@ -220,7 +237,6 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
     return batch
     
 def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_dict, select_strategy, dataset_name, target_layer=3, device='cuda'):
-    token_shuffle = True
     token2cluster = None
     clusters2token_list = None
     features = []
@@ -273,7 +289,8 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
                     replaced_idx = list(range(num_instances))
                     replaced_idx.remove(real_sentence_idx)
                     mux_minibatch['input_ids'][replaced_idx] = sample_sentences
-                mux_minibatch = mux_token_selection(model, filter_tokens, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
+                if select_strategy is not 'None':
+                    mux_minibatch = mux_token_selection(model, filter_tokens, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
                 mux_minibatch['real_sentence_idx'] = real_sentence_idx
                 outputs = model(**mux_minibatch)
                 hidden_states = outputs.hidden_states
@@ -340,7 +357,7 @@ def dataset_statistic(train_dataloader, eval_dataloader, dataset_name, tokenizer
             f.write(f'{seq_len}\n')
         
 
-def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, use_wandb=True):
+def train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, use_wandb=True, output_dir=None):
     # batch_size=32 # {roberta:32, mlp:64}
     learning_rate=2e-5 # {roberta:1e-5 2e-5 5e-5, mlp:2e-4}
     device='cuda'
@@ -352,7 +369,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     model = model.to(device)
     
     optimizer = torch.optim.AdamW(inversion_model.parameters(), lr=learning_rate)
-    
+
     print('load dataloader to memory')
     train_dataloader = dataloader2memory(train_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.select_strategy, config.dataset_name, config.target_layer, device)
     eval_dataloader = dataloader2memory(eval_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.select_strategy, config.dataset_name, config.target_layer, device)
@@ -457,7 +474,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                 best_top5_acc = top5_model_attack_acc
             if rouge_acc > best_rouge:
                 best_rouge = rouge_acc
-                
+
         if epoch == epochs - 1:
             with torch.no_grad():
                 hit_cnt = 0
@@ -508,8 +525,6 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                             for rec_idx in range(config.num_instances):
                                 f.write(f"{f'recover_token{rec_idx}':<20s}")
                             f.write('\n')
-                            # f.write(f"{'mux_token1':<20s}{'mux_token2':<20s}{'mux_token3':<20s}{'mux_token4':<20s}{'mux_token5':<20s}{'mux_token6':<20s}{'mux_token7':<20s}{'mux_token8':<20s}{'mux_token9':<20s}{'mux_token10':<20s} | ")
-                            # f.write(f"{'recover_token1':<20s}{'recover_token2':<20s}{'recover_token3':<20s}{'recover_token4':<20s}{'recover_token5':<20s}{'recover_token6':<20s}{'recover_token7':<20s}{'recover_token8':<20s}{'recover_token9':<20s}{'recover_token10':<20s}")
                             for word_idx in range(0, batch['input_ids'].size()[1]):
                                 if valid_ids[seq_idx][word_idx]:
                                     f.write(f"{tokenizer.decode(batch['input_ids'][seq_idx][word_idx]):<20s} | ")
@@ -531,7 +546,7 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
                 # print('attack acc:{}'.format(hit_cnt/total_cnt))
                 # if use_wandb:
                 #     wandb.log({'metric/inversion_model_top{}_acc'.format(topk): hit_cnt/total_cnt})
-        
+    
     with open(os.path.join(case_study_path, 'hit_tokens_stat.txt'),'w') as f:
         hit_tokens = sorted(hit_tokens.items(), key=lambda x: x[1], reverse=True)
         for (key, value) in hit_tokens:
@@ -553,9 +568,17 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
             for mux_token in key:
                 f.write(f"{mux_token:<15s}")
             f.write('\n')
-    # torch.save(model, 'mux_plms/ckpts/sst2/datamux-sst2-10/inversion_model_token_shuffle.pt')
+    # log the best
+    print(f'best_inversion_model_top1_acc:{best_top1_acc}')
+    print(f'best_inversion_model_top5_acc:{best_top5_acc}')
+    print(f'best_inversion_model_rouge:{best_rouge}')
+    if use_wandb:
+        wandb.log({'best/best_inversion_model_top1_acc': best_top1_acc})
+        wandb.log({'best/best_inversion_model_top5_acc': best_top5_acc})
+        wandb.log({'best/best_inversion_model_rouge_acc': best_rouge})
+    # save inversion model
+    torch.save(inversion_model, os.path.join(output_dir,'inversion_model.pt'))
     return model_attack_acc
-
 
 def rouge(input_ids, pred_ids, tokenizer):
     # input_ids (bsz, seq_len)
@@ -622,7 +645,7 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, label
     clusters2token_list = None
     if select_strategy == "conll_mux":
         conll2003_sentences = get_conll2003_sentences(tokenizer)
-    elif select_strategy == "cluster":
+    elif "cluster" in select_strategy:
         dataset_word_num = len(dataset_word_dict)
         n_clusters = dataset_word_num // (config.num_instances * 10)
         # save result
@@ -675,7 +698,8 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, label
                     replaced_idx = list(range(config.num_instances))
                     replaced_idx.remove(real_sentence_idx)
                     mux_minibatch['input_ids'][replaced_idx] = sample_sentences
-                mux_minibatch = mux_token_selection(model, filter_tokens_mux_token_selection, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
+                if select_strategy is not 'None':
+                    mux_minibatch = mux_token_selection(model, filter_tokens_mux_token_selection, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
                 mux_minibatch['real_sentence_idx'] = real_sentence_idx 
                 outputs = model(**mux_minibatch)
                 hidden_states = outputs.hidden_states
@@ -1562,7 +1586,7 @@ def main():
             for key,value in eval_metric.items():
                 wandb.log({f'metric/{key}':value})
     if model_args.train_inversion_model:
-        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, model_args.use_wandb)
+        model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, model_args.use_wandb, training_args.output_dir)
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)

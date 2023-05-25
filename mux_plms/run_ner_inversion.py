@@ -252,9 +252,9 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
         print('done')
     elif "cluster" in select_strategy:
         dataset_word_num = len(dataset_word_dict)
-        n_clusters = dataset_word_num // (num_instances * 10)
-        # save result
-        cluster_dir = f'kmeans_cluster_num{n_clusters}'
+        cluster_num = dataset_word_num // (num_instances * 10)
+        # load cluster result
+        cluster_dir = f'kmeans_cluster_num{cluster_num}'
         cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{dataset_name}', cluster_dir)
         with open(f'{cluster_path}/{cluster_dir}_token2cluster.pickle',"rb") as f:
             token2cluster = pickle.load(f)
@@ -647,9 +647,9 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, label
         conll2003_sentences = get_conll2003_sentences(tokenizer)
     elif "cluster" in select_strategy:
         dataset_word_num = len(dataset_word_dict)
-        n_clusters = dataset_word_num // (config.num_instances * 10)
+        cluster_num = dataset_word_num // (config.num_instances * 10)
         # save result
-        cluster_dir = f'kmeans_cluster_num{n_clusters}'
+        cluster_dir = f'kmeans_cluster_num{cluster_num}'
         cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{config.dataset_name}', cluster_dir)
         with open(f'{cluster_path}/{cluster_dir}_token2cluster.pickle',"rb") as f:
             token2cluster = pickle.load(f)
@@ -775,8 +775,8 @@ def cluster_pipeline(model, dataset_word_dict, dataset_name, num_instances):
     print('clustering......')
     import time
     start_time = time.time()
-    n_clusters = dataset_word_num // (num_instances * 10)
-    clusters = KMeans(n_clusters=n_clusters, random_state=0).fit(dataset_emb)
+    cluster_num = dataset_word_num // (num_instances * 10)
+    clusters = KMeans(n_clusters=cluster_num, random_state=0).fit(dataset_emb)
     dataset_emb_cluster_result = clusters.predict(dataset_emb)
     print('clustering......done! cost {} seconds'.format(time.time()-start_time))
     token2cluster = {}
@@ -789,7 +789,7 @@ def cluster_pipeline(model, dataset_word_dict, dataset_name, num_instances):
             clusters2token_list[cluster_ids] = []
         clusters2token_list[cluster_ids].append(token_input_ids)
     # save result 
-    cluster_dir = f'kmeans_cluster_num{n_clusters}'
+    cluster_dir = f'kmeans_cluster_num{cluster_num}'
     cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{dataset_name}', cluster_dir)
     if not os.path.exists(cluster_path):
         os.makedirs(cluster_path)        
@@ -1577,13 +1577,19 @@ def main():
     
     if model_args.do_dataset_statistic:
         dataset_statistic(train_dataloader, eval_dataloader, data_args.dataset_name, tokenizer)
-    if model_args.do_cluster:
-        cluster_pipeline(model, dataset_word_dict, data_args.dataset_name, config.num_instances)
+    # if cluster have not been done, do cluster
+    if 'cluster' in config.select_strategy:
+        dataset_word_num = len(dataset_word_dict)
+        cluster_num = dataset_word_num // (config.num_instances * 10)
+        cluster_dir = f'kmeans_cluster_num{cluster_num}'
+        cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{data_args.dataset_name}', cluster_dir)
+        if not os.path.exists(cluster_path):
+            cluster_pipeline(model, dataset_word_dict, data_args.dataset_name, config.num_instances)
     
     if model_args.eval_with_knn_attack:
         eval_metric = evaluate_with_knn_attack(model, eval_dataloader, tokenizer, metric, config, label_list, dataset_word_dict)
         if model_args.use_wandb:
-            for key,value in eval_metric.items():
+            for key, value in eval_metric.items():
                 wandb.log({f'metric/{key}':value})
     if model_args.train_inversion_model:
         model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, model_args.use_wandb, training_args.output_dir)

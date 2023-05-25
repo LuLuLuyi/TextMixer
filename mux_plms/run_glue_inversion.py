@@ -62,6 +62,7 @@ import torch.nn.functional as F
 import wandb
 import pickle
 from sklearn.cluster import KMeans
+from matplotlib import pyplot as plt
 
 
 task_to_keys = {
@@ -576,7 +577,7 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, datas
         n_clusters = dataset_word_num // (config.num_instances * 10)
         # save result
         cluster_dir = f'kmeans_cluster_num{n_clusters}'
-        cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{config.dataset_name}', cluster_dir)
+        cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{config.task_name}', cluster_dir)
         with open(f'{cluster_path}/{cluster_dir}_token2cluster.pickle',"rb") as f:
             token2cluster = pickle.load(f)
         with open(f'{cluster_path}/{cluster_dir}_clusters2token_list.pickle',"rb") as f:
@@ -660,7 +661,7 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, datas
     eval_metric['knn_rouge'] = rouge_hit_cnt/rouge_total_cnt
     return eval_metric
 
-def cluster_pipeline(model, dataset_word_dict, dataset_name, num_instances):
+def cluster_pipeline(model, dataset_word_dict, task_name, num_instances):
     # get dataset embedding
     emb = model.bert.embeddings.word_embeddings.weight.cpu().detach().numpy()
     dataset_emb = emb[dataset_word_dict]
@@ -684,7 +685,7 @@ def cluster_pipeline(model, dataset_word_dict, dataset_name, num_instances):
         clusters2token_list[cluster_ids].append(token_input_ids)
     # save result 
     cluster_dir = f'kmeans_cluster_num{n_clusters}'
-    cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{dataset_name}', cluster_dir)
+    cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{task_name}', cluster_dir)
     if not os.path.exists(cluster_path):
         os.makedirs(cluster_path)        
     unique, counts = np.unique(list(token2cluster.values()), return_counts=True)
@@ -1408,12 +1409,19 @@ def main():
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=60, drop_last=True
     )
     eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=60, drop_last=True)
+    
     torch.cuda.empty_cache()
     print('statistic dataset word dict')
     dataset_word_dict = get_dataset_word_dict(train_dataset, eval_dataset)
     print('done')
-    if model_args.do_cluster:
-        cluster_pipeline(model, dataset_word_dict, data_args.dataset_name, config.num_instances)
+    # if cluster have not been done, do cluster
+    if 'cluster' in config.select_strategy:
+        dataset_word_num = len(dataset_word_dict)
+        cluster_num = dataset_word_num // (config.num_instances * 10)
+        cluster_dir = f'kmeans_cluster_num{cluster_num}'
+        cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{config.task_name}', cluster_dir)
+        if not os.path.exists(cluster_path):
+            cluster_pipeline(model, dataset_word_dict, config.task_name, config.num_instances)
     # set_seed(3)
     if model_args.eval_with_knn_attack:
         eval_metric = evaluate_with_knn_attack(model, eval_dataloader, tokenizer, metric, config, dataset_word_dict)

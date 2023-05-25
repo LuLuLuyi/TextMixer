@@ -264,7 +264,7 @@ NUM_EVAL_STEPS=${task2numevalstepsmap[$TASK_NAME]}
 # other miscelleneous params
 MAX_SEQ_LENGTH=128
 if [ "$TASK_NAME" = "imdb" ]; then
-    MAX_SEQ_LENGTH=448
+    MAX_SEQ_LENGTH=512
 fi
 
 if [ "$SETTING" = "finetuning" ]; then

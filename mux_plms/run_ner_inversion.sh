@@ -345,6 +345,7 @@ CMD="python run_ner_inversion.py \
 --dataset_name ${DATASET_NAME} \
 --num_hidden_demux_layers 3 \
 --save_total_limit 1 \
+--do_cluster True \
 --epsilon $EPSILON \
 --add_embedding_noise $ADD_EMBEDDING_NOISE \
 --train_inversion_model $TRAIN_INVERSION_MODEL \

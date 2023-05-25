@@ -164,6 +164,37 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
     elif select_strategy=="cluster":
         real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
         real_sentence = batch['input_ids'][real_sentence_idx]
+        for idx in range(1, real_sentence_length):
+            cur_token = real_sentence[idx]
+            # cluster sample
+            cluster_id = token2cluster[int(cur_token.item())]
+            cluster_sample_pool = clusters2token_list[cluster_id]
+            cluster_sample_pool_repeat = (batch_size-1) // len(cluster_sample_pool) + 1
+            if cluster_sample_pool_repeat > 1 :
+                cluster_sample_pool = [token for token in cluster_sample_pool for i in range(cluster_sample_pool_repeat)]
+            cluster_selected_tokens = random.sample(cluster_sample_pool, k=batch_size-1)
+            selected_tokens = cluster_selected_tokens
+            selected_tokens.insert(real_sentence_idx, cur_token)
+            selected_tokens = torch.tensor(selected_tokens)
+            batch['input_ids'][:,idx] = selected_tokens
+    elif select_strategy=="realsen":
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        real_sentence = batch['input_ids'][real_sentence_idx]
+        real_sentence_sample_num = batch_size-1 # [0, num_instances-1] or (batch_size-1) // 2
+        real_sentence_sample_pool_repeat = (real_sentence_sample_num // (real_sentence_length-1)) + 1
+        for idx in range(1, real_sentence_length):
+            cur_token = real_sentence[idx]
+            # real sentence sample
+            real_sentence_sample_pool = list(real_sentence[1:real_sentence_length].repeat(real_sentence_sample_pool_repeat))
+            real_sentence_sample_pool.remove(cur_token)
+            real_sentence_selected_tokens = random.sample(real_sentence_sample_pool, k=real_sentence_sample_num)
+            selected_tokens = real_sentence_selected_tokens
+            selected_tokens.insert(real_sentence_idx, cur_token)
+            selected_tokens = torch.tensor(selected_tokens)
+            batch['input_ids'][:,idx] = selected_tokens
+    elif select_strategy=="cluster_realsen":
+        real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
+        real_sentence = batch['input_ids'][real_sentence_idx]
         real_sentence_sample_num = 4 # [0, num_instances-1] or (batch_size-1) // 2
         real_sentence_sample_pool_repeat = (real_sentence_sample_num // (real_sentence_length-1)) + 1
         for idx in range(1, real_sentence_length):
@@ -203,7 +234,7 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
         print('get conll2003 dataset sentences')
         conll2003_sentences = get_conll2003_sentences(tokenizer)
         print('done')
-    elif select_strategy == "cluster":
+    elif "cluster" in select_strategy:
         dataset_word_num = len(dataset_word_dict)
         n_clusters = dataset_word_num // (num_instances * 10)
         # save result

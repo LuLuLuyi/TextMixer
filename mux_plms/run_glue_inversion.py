@@ -293,7 +293,7 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
                 # mux_sentence_ids.insert(real_sentence_idx, idx)
                 
                 mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}
-                if select_strategy is not 'None':
+                if select_strategy != 'None':
                     mux_minibatch = mux_token_selection(model, filter_tokens, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
                 mux_minibatch['real_sentence_idx'] = real_sentence_idx
                 outputs = model(**mux_minibatch)
@@ -617,7 +617,7 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, datas
                 # mux_sentence_ids.insert(real_sentence_idx, idx)
                 
                 mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}
-                if select_strategy is not 'None':
+                if select_strategy != 'None':
                     mux_minibatch = mux_token_selection(model, filter_tokens_mux_token_selection, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
                 mux_minibatch['real_sentence_idx'] = real_sentence_idx 
                 outputs = model(**mux_minibatch)

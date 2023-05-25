@@ -42,6 +42,7 @@ for CONFIG_TYPE in ${CONFIG_TYPES[@]}; do
                 --eval_with_knn_attack True \
                 --train_inversion_model True \
                 --add_embedding_noise True \
+                --select_strategy None \
                 --epsilon $EPSILON \
                 --wandb_name ${TASK_NAME}_mux${NUM_SENTENCES}_embedding_noise_eps${EPSILON}"
                 if [ $USE_SLURM -eq 1 ]; then

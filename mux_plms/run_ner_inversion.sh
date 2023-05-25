@@ -180,7 +180,7 @@ while :; do
                 SELECT_STRATEGY=$2
                 shift
             else
-                die 'ERROR: "--wandb_name" requires a non-empty option argument.'
+                die 'ERROR: "--select_strategy" requires a non-empty option argument.'
             fi
             ;;
 
@@ -345,7 +345,6 @@ CMD="python run_ner_inversion.py \
 --dataset_name ${DATASET_NAME} \
 --num_hidden_demux_layers 3 \
 --save_total_limit 1 \
---do_cluster True \
 --epsilon $EPSILON \
 --add_embedding_noise $ADD_EMBEDDING_NOISE \
 --train_inversion_model $TRAIN_INVERSION_MODEL \

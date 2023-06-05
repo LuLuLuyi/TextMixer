@@ -87,6 +87,35 @@ class InversionPLM(nn.Module):
         logits = outputs.logits
         pred = torch.argmax(F.softmax(logits,dim=-1), dim=2)
         return logits, pred
+    
+class InversionPLMMLC(nn.Module):
+    def __init__(self, config, model_name_or_path='roberta-base'):
+        super(InversionPLMMLC,self).__init__()
+        self.vocab_size = config.vocab_size
+        self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
+
+        self.loss = torch.nn.BCELoss()
+        self.sigmod = torch.nn.Sigmoid()
+
+    def forward(self, x, labels=None, attention_mask=None, token_type_ids=None):
+        bsz, seq_len, hid_dim = x.shape
+        device = x.device
+    
+        logits = self.model(inputs_embeds=x, attention_mask=attention_mask, token_type_ids=token_type_ids).logits
+        
+        logits = self.sigmod(torch.mean(logits, dim=1)) # (bsz, dim)
+
+        loss = None
+        if labels is not None:
+            labels = torch.zeros(bsz, self.vocab_size).to(device).scatter_(1, labels, 1.)
+            labels[:,0:3] = 0
+            loss = self.loss(logits, labels)
+        return logits, loss
+
+    def predict(self, x, labels=None, attention_mask=None, token_type_ids=None):
+        logits = self.model(inputs_embeds=x, attention_mask=attention_mask, token_type_ids=token_type_ids).logits
+        pred = torch.round(self.sigmod(torch.mean(logits, dim=1))) # (bsz, vocab_size)
+        return logits, pred
 
 def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict, select_strategy='None',  token2cluster=None, clusters2token_list=None): 
     batch_size, sequence_length = batch['input_ids'].size()
@@ -252,7 +281,9 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
         print('done')
     elif "cluster" in select_strategy:
         dataset_word_num = len(dataset_word_dict)
+        # cluster num set
         cluster_num = dataset_word_num // (num_instances * 10)
+        # cluster_num = 50
         # load cluster result
         cluster_dir = f'kmeans_cluster_num{cluster_num}'
         cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{dataset_name}', cluster_dir)
@@ -380,9 +411,9 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     progress_bar = tqdm(range(total_step))
     special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
     # filted inversion
-    # simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':','the','a','t','n','?','%','of','and','s','to','is','was','for','that','in','as','on'])
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':',';','`','<','>','#','the','a','t','n','?','%','/','\\','&','$','of','br','and','s','##s','to','is','was','for','that','in','as','on'])
     # origin inversion
-    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+    # simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
     filter_tokens = list(set(special_tokens + simple_tokens))
     completed_steps = 0
     model_attack_acc = 0
@@ -578,7 +609,114 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
         wandb.log({'best/best_inversion_model_rouge_acc': best_rouge})
     # save inversion model
     torch.save(inversion_model, os.path.join(output_dir,'inversion_model.pt'))
+    # train mlc model
+    train_mlc_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, use_wandb=use_wandb, output_dir=output_dir, inversion_epochs=20, inversion_lr=5e-5)
     return model_attack_acc
+
+def token_hit(input_ids, pred_ids, tokenizer, filter_tokens):
+    batch_real_tokens = [tokenizer.convert_ids_to_tokens(item) for item in input_ids]
+    batch_pred_tokens = [tokenizer.convert_ids_to_tokens(item) for item in pred_ids]
+    hit_cnt = 0
+    total_cnt = 0
+    for real_tokens, pred_tokens in zip(batch_real_tokens, batch_pred_tokens):
+        real_tokens = {item for item in set(real_tokens) if item not in filter_tokens}
+        pred_tokens = {item for item in set(pred_tokens) if item not in filter_tokens}
+        hit_cnt += len(real_tokens & pred_tokens)
+        total_cnt += len(real_tokens)
+    return hit_cnt, total_cnt
+
+def train_mlc_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, use_wandb=True, output_dir=None, inversion_epochs=20, inversion_lr=5e-5):
+    device ='cuda'
+    learning_rate = inversion_lr # {roberta:5e-5, mlp:2e-4}
+    epochs = inversion_epochs
+    inversion_model = InversionPLMMLC(config)
+
+    inversion_model = inversion_model.to(device)
+    model = model.to(device)
+    
+    # print('load dataloader to memory')
+    # train_dataloader = dataloader2memory(train_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.select_strategy, config.task_name, config.target_layer, device)
+    # eval_dataloader = dataloader2memory(eval_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.select_strategy, config.task_name, config.target_layer, device)
+    # print('done')
+    
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in inversion_model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "weight_decay": 0.01,
+        },
+        {
+            "params": [p for n, p in inversion_model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=learning_rate)
+    
+    total_step = len(train_dataloader) * epochs
+
+    progress_bar = tqdm(range(total_step))
+    special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
+    # filted inversion
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':',';','`','<','>','#','the','a','t','n','?','%','/','\\','&','$','of','br','and','s','##s','to','is','was','for','that','in','as','on'])
+    # origin inversion
+    # simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+    filter_tokens = list(set(special_tokens + simple_tokens))
+    
+    completed_steps = 0
+    model_attack_acc = 0
+    best_eval_attack_acc = 0
+    print('################# start train mlc model #################')
+    for epoch in range(epochs):
+        for step, batch in enumerate(train_dataloader):
+            batch = {key:value.to(device) for key,value in batch.items()}
+    
+            target_hidden_states = batch['hidden_states']
+            labels = batch['input_ids']
+            attention_mask = batch['attention_mask']
+            attention_mask[word_filter(labels, filter_tokens)] = 0 
+            
+            logits, loss = inversion_model(target_hidden_states, labels, attention_mask=attention_mask)
+            
+            if use_wandb:
+                wandb.log({'loss/inversion_model_loss':loss.item()})
+
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            completed_steps += 1
+            progress_bar.update(1)
+            progress_bar.set_description('mlc_model_loss:{}'.format(loss.item()))
+
+        if True:
+            hit_cnt = 0
+            total_cnt = 0
+            for batch in eval_dataloader:
+                batch = {key:value.to(device) for key,value in batch.items()}
+                
+                target_hidden_states = batch['hidden_states']
+                eval_label = batch['input_ids']
+                attention_mask = batch['attention_mask']
+                
+                pred_logits, batch_preds = inversion_model.predict(target_hidden_states, attention_mask=attention_mask)
+                bsz, _ = batch_preds.shape
+                batch_eval_label = batch['input_ids']
+                for i in range(bsz):
+                    preds = batch_preds[i].nonzero().squeeze(-1).unsqueeze(0)
+                    eval_label = batch_eval_label[i].unsqueeze(0)
+                    temp_hit, temp_total = token_hit(eval_label, preds, tokenizer, filter_tokens)
+                    hit_cnt += temp_hit
+                    total_cnt += temp_total
+            print('eval mlc attack acc:{}'.format(hit_cnt/total_cnt))
+            if use_wandb:
+                wandb.log({'metric/eval_mlc_model_acc': hit_cnt/total_cnt})
+            if hit_cnt/total_cnt > best_eval_attack_acc:
+                best_eval_attack_acc = hit_cnt/total_cnt
+    print(f'best_eval_mlc_model_acc:{best_eval_attack_acc}')
+    if use_wandb:
+        wandb.log({'best/best_mlc_model_acc': best_eval_attack_acc})
+     # save inversion model
+    torch.save(inversion_model, os.path.join(output_dir,'mlc_model.pt'))
+
 
 def rouge(input_ids, pred_ids, tokenizer):
     # input_ids (bsz, seq_len)
@@ -647,7 +785,9 @@ def evaluate_with_knn_attack(model, dataloader, tokenizer, metric, config, label
         conll2003_sentences = get_conll2003_sentences(tokenizer)
     elif "cluster" in select_strategy:
         dataset_word_num = len(dataset_word_dict)
+        # cluster num set
         cluster_num = dataset_word_num // (config.num_instances * 10)
+        # cluster_num = 50
         # save result
         cluster_dir = f'kmeans_cluster_num{cluster_num}'
         cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{config.dataset_name}', cluster_dir)
@@ -775,7 +915,9 @@ def cluster_pipeline(model, dataset_word_dict, dataset_name, num_instances):
     print('clustering......')
     import time
     start_time = time.time()
+    # cluster num set
     cluster_num = dataset_word_num // (num_instances * 10)
+    # cluster_num = 50
     clusters = KMeans(n_clusters=cluster_num, random_state=0).fit(dataset_emb)
     dataset_emb_cluster_result = clusters.predict(dataset_emb)
     print('clustering......done! cost {} seconds'.format(time.time()-start_time))
@@ -1386,7 +1528,8 @@ def main():
     # if training_args.do_eval:
     if "validation" not in raw_datasets:
         raise ValueError("--do_eval requires a validation dataset")
-    eval_dataset = raw_datasets["validation"]
+    # use test dataset to attack
+    eval_dataset = raw_datasets["test"]
     if data_args.max_eval_samples is not None:
         eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
     eval_dataset = eval_dataset.map(
@@ -1564,7 +1707,10 @@ def main():
             ] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
         else:
             kwargs["dataset"] = data_args.dataset_name
+            
+    
 
+    
     train_dataloader = DataLoader(
         train_dataset, shuffle=True, collate_fn=data_collator, batch_size=60, drop_last=True
     )
@@ -1580,7 +1726,9 @@ def main():
     # if cluster have not been done, do cluster
     if 'cluster' in config.select_strategy:
         dataset_word_num = len(dataset_word_dict)
+        # cluster num set
         cluster_num = dataset_word_num // (config.num_instances * 10)
+        # cluster_num = 50
         cluster_dir = f'kmeans_cluster_num{cluster_num}'
         cluster_path = os.path.join(f'/root/mixup/mux_plms/cluster/{data_args.dataset_name}', cluster_dir)
         if not os.path.exists(cluster_path):

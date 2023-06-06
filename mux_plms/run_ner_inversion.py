@@ -73,7 +73,7 @@ version_2_modelcls = {
 }
 
 class InversionPLM(nn.Module):
-    def __init__(self, config, model_name_or_path='roberta-base'):
+    def __init__(self, config, model_name_or_path='bert-base-uncased'):
         super(InversionPLM, self).__init__()
         self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
         self.loss = torch.nn.CrossEntropyLoss()
@@ -89,7 +89,7 @@ class InversionPLM(nn.Module):
         return logits, pred
     
 class InversionPLMMLC(nn.Module):
-    def __init__(self, config, model_name_or_path='roberta-base'):
+    def __init__(self, config, model_name_or_path='bert-base-uncased'):
         super(InversionPLMMLC,self).__init__()
         self.vocab_size = config.vocab_size
         self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)

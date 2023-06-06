@@ -67,6 +67,30 @@ class InversionPLM(nn.Module):
         logits = outputs.logits
         pred = torch.argmax(F.softmax(logits,dim=-1), dim=2)
         return logits, pred
+    
+class InversionPLMMLC(nn.Module):
+    def __init__(self, config, model_name_or_path='bert-base-uncased'):
+        super(InversionPLMMLC,self).__init__()
+        self.vocab_size = config.vocab_size
+        self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
+
+        self.loss = torch.nn.BCELoss()
+        self.sigmod = torch.nn.Sigmoid()
+
+    def forward(self, x, labels=None, attention_mask=None, token_type_ids=None):
+        bsz, seq_len, hid_dim = x.shape
+        device = x.device
+    
+        logits = self.model(inputs_embeds=x, attention_mask=attention_mask, token_type_ids=token_type_ids).logits
+        
+        logits = self.sigmod(torch.mean(logits, dim=1)) # (bsz, dim)
+
+        loss = None
+        if labels is not None:
+            labels = torch.zeros(bsz, self.vocab_size).to(device).scatter_(1, labels, 1.)
+            labels[:,0:3] = 0
+            loss = self.loss(logits, labels)
+        return logits, loss
 
 def dataloader2memory_with_word_dropout(dataloader, model, target_layer=3, device='cuda'):
     features = []
@@ -110,7 +134,10 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     
     progress_bar = tqdm(range(total_step))
     special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
-    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+    # filted inversion
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':',';','`','<','>','#','the','a','t','n','?','%','/','\\','&','$','of','br','and','s','##s','to','is','was','for','that','in','as','on'])
+    # origin inversion
+    # simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
     filter_tokens = list(set(special_tokens + simple_tokens))
     
     completed_steps = 0
@@ -301,6 +328,7 @@ task_to_keys = {
     "rte": ("sentence1", "sentence2"),
     "sst2": ("sentence", None),
     "imdb": ("text", None),
+    "ag_news": ("text", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
 }
@@ -542,6 +570,8 @@ def main():
         # Downloading and loading a dataset from the hub.
         if args.task_name == "imdb":
             raw_datasets = load_dataset("imdb")
+        elif args.task_name == "ag_news":
+            raw_datasets = load_dataset("ag_news")
         else:
             raw_datasets = load_dataset("glue", args.task_name)
     else:
@@ -668,7 +698,7 @@ def main():
     # processed_datasets.set_format(type='torch', columns=columns_to_return)
 
     train_dataset = processed_datasets["train"]
-    eval_dataset = processed_datasets["test" if args.task_name == "imdb" else "validation"]
+    eval_dataset = processed_datasets["test" if args.task_name == "imdb" or args.task_name == "ag_news" else "validation"]
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
@@ -748,6 +778,8 @@ def main():
     # Get the metric function
     if args.task_name is not None:
         if args.task_name == "imdb":
+            metric = evaluate.load("accuracy")
+        elif args.task_name == "ag_news":
             metric = evaluate.load("accuracy")
         else:
             metric = evaluate.load("glue", args.task_name)

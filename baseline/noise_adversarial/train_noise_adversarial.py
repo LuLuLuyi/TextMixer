@@ -132,6 +132,11 @@ class InversionPLMMLC(nn.Module):
             loss = self.loss(logits, labels)
         return logits, loss
 
+    def predict(self, x, labels=None, attention_mask=None, token_type_ids=None):
+        logits = self.model(inputs_embeds=x, attention_mask=attention_mask, token_type_ids=token_type_ids).logits
+        pred = torch.round(self.sigmod(torch.mean(logits, dim=1))) # (bsz, vocab_size)
+        return logits, pred
+
 def token_hit(input_ids, pred_ids, tokenizer, special_tokens):
     batch_real_tokens = [tokenizer.convert_ids_to_tokens(item) for item in input_ids]
     batch_pred_tokens = [tokenizer.convert_ids_to_tokens(item) for item in pred_ids]

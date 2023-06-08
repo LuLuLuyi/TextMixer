@@ -97,15 +97,14 @@ class InversionPLMMLC(nn.Module):
         pred = torch.round(self.sigmod(torch.mean(logits, dim=1))) # (bsz, vocab_size)
         return logits, pred
     
-def token_hit(input_ids, pred_ids, tokenizer, special_tokens):
+def token_hit(input_ids, pred_ids, tokenizer, filter_tokens):
     batch_real_tokens = [tokenizer.convert_ids_to_tokens(item) for item in input_ids]
     batch_pred_tokens = [tokenizer.convert_ids_to_tokens(item) for item in pred_ids]
     hit_cnt = 0
     total_cnt = 0
-    special_tokens = ['<s>', '</s>', '<pad>']
     for real_tokens, pred_tokens in zip(batch_real_tokens, batch_pred_tokens):
-        real_tokens = {item.replace('Ġ', '').lower() for item in set(real_tokens) if item not in special_tokens}
-        pred_tokens = {item.replace('Ġ', '').lower() for item in set(pred_tokens) if item not in special_tokens}
+        real_tokens = {item for item in set(real_tokens) if item not in filter_tokens}
+        pred_tokens = {item for item in set(pred_tokens) if item not in filter_tokens}
         hit_cnt += len(real_tokens & pred_tokens)
         total_cnt += len(real_tokens)
     return hit_cnt, total_cnt
@@ -147,7 +146,11 @@ def train_mlc_model(config, tokenizer, model, train_dataloader, eval_dataloader,
     
     progress_bar = tqdm(range(total_step))
     special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
-    filter_tokens = list(set(special_tokens))
+    # filted inversion
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':',';','`','<','>','#','the','a','t','n','?','%','/','\\','&','$','of','br','and','s','##s','to','is','was','for','that','in','as','on'])
+    # origin inversion
+    # simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-'])
+    filter_tokens = list(set(special_tokens + simple_tokens))
     
     completed_steps = 0
     model_attack_acc = 0
@@ -190,7 +193,7 @@ def train_mlc_model(config, tokenizer, model, train_dataloader, eval_dataloader,
                 for i in range(bsz):
                     preds = batch_preds[i].nonzero().squeeze(-1).unsqueeze(0)
                     eval_label = batch_eval_label[i].unsqueeze(0)
-                    temp_hit, temp_total = token_hit(eval_label, preds, tokenizer, special_tokens)
+                    temp_hit, temp_total = token_hit(eval_label, preds, tokenizer, filter_tokens)
                     hit_cnt += temp_hit
                     total_cnt += temp_total
             print('eval mlc attack acc:{}'.format(hit_cnt/total_cnt))

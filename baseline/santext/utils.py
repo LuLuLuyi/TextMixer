@@ -111,6 +111,17 @@ def get_vocab_ag_news(data_dir,tokenizer,tokenizer_type="subword",embedding_type
                 vocab[token]+=1
     return vocab
 
+def get_vocab_imdb(data_dir,tokenizer,tokenizer_type="subword",embedding_type="glove",):
+    vocab=Counter()
+    dataset = load_dataset('imdb')
+    for split in ['train','test']:
+        data_file = dataset[split]
+        for sequence in tqdm(data_file['text']):
+            tokenized_tokens = [token.text for token in tokenizer(sequence)]
+            for token in tokenized_tokens:
+                vocab[token]+=1
+    return vocab
+
 def get_vocab_sst2(data_dir,tokenizer,tokenizer_type="subword",embedding_type="glove",):
     vocab=Counter()
     dataset = load_dataset('sst2')

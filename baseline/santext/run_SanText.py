@@ -11,7 +11,7 @@ from scipy.special import softmax
 from functools import partial
 from multiprocessing import Pool, cpu_count
 from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances, manhattan_distances
-from utils import get_vocab_SST2, get_vocab_CliniSTS, get_vocab_QNLI, get_vocab_ag_news, get_vocab_sst2, get_vocab_conll2003, get_vocab_ontonotes, word_normalize
+from utils import get_vocab_SST2, get_vocab_CliniSTS, get_vocab_QNLI, get_vocab_ag_news, get_vocab_imdb, get_vocab_sst2, get_vocab_conll2003, get_vocab_ontonotes, word_normalize
 from spacy.lang.en import English
 from transformers import BertTokenizer, BertForMaskedLM, RobertaTokenizer, RobertaForMaskedLM
 from SanText import SanText_plus,SanText_plus_init
@@ -92,7 +92,7 @@ def main():
     )
 
     parser.add_argument('--task',
-                        choices=['CliniSTS', "SST-2", "QNLI", "conll2003", "ontonotes", "ag_news","sst2"],
+                        choices=['CliniSTS', "SST-2", "QNLI", "conll2003", "ontonotes", "ag_news", "imdb","sst2"],
                         default='SST-2',
                         help='NLP eval tasks')
 
@@ -149,6 +149,8 @@ def main():
         vocab = get_vocab_ontonotes(args.data_dir, tokenizer, tokenizer_type=tokenizer_type)
     elif args.task == "ag_news":
         vocab = get_vocab_ag_news(args.data_dir, tokenizer, tokenizer_type=tokenizer_type)
+    elif args.task == "imdb":
+        vocab = get_vocab_imdb(args.data_dir, tokenizer, tokenizer_type=tokenizer_type)
     elif args.task == "CliniSTS":
         vocab = get_vocab_CliniSTS(args.data_dir, tokenizer, tokenizer_type=tokenizer_type)
     elif args.task == "QNLI":
@@ -337,11 +339,11 @@ def main():
                     out_file.write(write_content)
 
             out_file.close()
-    elif args.task in ["conll2003","ontonotes","ag_news","sst2"]:
+    elif args.task in ["conll2003","ontonotes","ag_news", "imdb", "sst2"]:
         dataset_name = args.task if args.task!='ontonotes' else 'tner/ontonotes5'
         dataset = load_dataset(dataset_name)
         raw_dataset = load_dataset(dataset_name)
-        name_list = ['train', 'test'] if args.task == "ag_news" else ['train','validation','test']
+        name_list = ['train', 'test'] if args.task == "ag_news" or args.task == "imdb" else ['train','validation','test']
         for file_name in name_list:
             data_file = dataset[file_name]
             raw_data_file = raw_dataset[file_name]
@@ -355,7 +357,7 @@ def main():
                 for tokens in tqdm(data_file['tokens']):
                     doc = [tokenizer(token).text for token in tokens]
                     docs.append(doc)
-            elif args.task == "ag_news":
+            elif args.task == "ag_news" or "imdb":
                 for sequence in tqdm(data_file['text']):
                     doc = [token.text for token in tokenizer(sequence)]
                     docs.append(doc)
@@ -393,7 +395,7 @@ def main():
                 data_file = data_file.remove_columns('tokens')
                 data_file = data_file.add_column(name='tokens', column=results)
                 dataset[file_name] = data_file
-            elif args.task == "ag_news":
+            elif args.task == "ag_news" or args.task == "imdb":
                 raw_data_file = raw_data_file.remove_columns('text')
                 raw_data_file = raw_data_file.add_column(name='text', column=raw_docs)
                 raw_dataset[file_name] = raw_data_file

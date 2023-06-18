@@ -169,7 +169,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         selection_tokens = dataset_word_dict[selection_ids].to('cuda')
         batch['input_ids'][invalid_ids] = selection_tokens
     elif select_strategy == 'all_similar' or select_strategy=='all_far':
-        largest = True if select_strategy=='far' else False
+        largest = True if select_strategy=='all_far' else False
         real_sentence_embedding = model.bert.embeddings(input_ids=batch['input_ids'][real_sentence_idx].unsqueeze(0))
         emb_dataset = emb[dataset_word_dict]
         ed = torch.cdist(real_sentence_embedding, emb_dataset, p=2.0) # (samples, embeddings)
@@ -227,12 +227,19 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
         real_sentence = batch['input_ids'][real_sentence_idx]
         real_sentence_sample_num = batch_size-1 # [0, num_instances-1] or (batch_size-1) // 2
-        real_sentence_sample_pool_repeat = (real_sentence_sample_num // (real_sentence_length-1)) + 1
+        sample_pool = list(real_sentence[1:real_sentence_length])
+        # 去掉采样池中的简单词
+        for token in sample_pool:
+            if token in filter_tokens:
+                sample_pool.remove(token)
+        real_sentence_sample_pool_repeat = (real_sentence_sample_num // (len(sample_pool)-1)) + 1
         for idx in range(1, real_sentence_length):
             cur_token = real_sentence[idx]
             # real sentence sample
-            real_sentence_sample_pool = list(real_sentence[1:real_sentence_length].repeat(real_sentence_sample_pool_repeat))
-            real_sentence_sample_pool.remove(cur_token)
+            real_sentence_sample_pool = sample_pool[:]
+            if cur_token in real_sentence_sample_pool:
+                real_sentence_sample_pool.remove(cur_token)
+            real_sentence_sample_pool *= real_sentence_sample_pool_repeat
             real_sentence_selected_tokens = random.sample(real_sentence_sample_pool, k=real_sentence_sample_num)
             selected_tokens = real_sentence_selected_tokens
             selected_tokens.insert(real_sentence_idx, cur_token)
@@ -273,7 +280,7 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
     model.eval()
     # filter special tokens
     special_tokens = tokenizer.convert_tokens_to_ids(['[PAD]','[SEP]'])
-    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':','the','a','t','n','?','%','of','and','s','to','it','is','was','for','that','in','as','on'])
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':',';','`','<','>','#','the','a','t','n','?','%','/','\\','&','$','of','br','and','s','##s','to','is','was','for','that','in','as','on'])
     filter_tokens = list(set(special_tokens + simple_tokens))
     if select_strategy == "conll_mux":
         print('get conll2003 dataset sentences')

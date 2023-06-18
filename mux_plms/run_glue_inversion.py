@@ -185,7 +185,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         selection_tokens = dataset_word_dict[selection_ids].to('cuda')
         batch['input_ids'][invalid_ids] = selection_tokens
     elif select_strategy == 'all_similar' or select_strategy=='all_far':
-        largest = True if select_strategy=='far' else False
+        largest = True if select_strategy=='all_far' else False
         real_sentence_embedding = model.bert.embeddings(input_ids=batch['input_ids'][real_sentence_idx].unsqueeze(0))
         emb_dataset = emb[dataset_word_dict]
         ed = torch.cdist(real_sentence_embedding, emb_dataset, p=2.0) # (samples, embeddings)
@@ -218,8 +218,15 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         filled_input_ids = torch.clone(batch['input_ids'])
         for sequence_idx in range(batch_size):
             sep_idx = list(batch['input_ids'][sequence_idx]).index(102)
-            for word_idx in range(sep_idx, sequence_length):
-                filled_input_ids[sequence_idx][word_idx] = batch['input_ids'][sequence_idx][word_idx%(sep_idx-1)+1]
+            simple_token_ids = (filled_input_ids[sequence_idx]==-1)
+            simple_token_ids[word_filter(filled_input_ids[sequence_idx], filter_tokens)] = True
+            simple_token_ids[sep_idx:] = True
+            sample_ids = (simple_token_ids!=True)
+            sample_ids[0] = False
+            sample_pool = batch['input_ids'][sequence_idx][sample_ids]
+            # 生成待替换词的随机下标
+            selection_ids = torch.randint(low=0, high=len(sample_pool)-1, size=filled_input_ids[sequence_idx][simple_token_ids].size())
+            filled_input_ids[sequence_idx][simple_token_ids] = sample_pool[selection_ids]
         # 把假句子用自身填满
         filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
         batch['input_ids'][invalid_ids] = filled_input_ids[invalid_ids]
@@ -243,12 +250,19 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
         real_sentence = batch['input_ids'][real_sentence_idx]
         real_sentence_sample_num = batch_size-1 # [0, num_instances-1] or (batch_size-1) // 2
-        real_sentence_sample_pool_repeat = (real_sentence_sample_num // (real_sentence_length-1)) + 1
+        sample_pool = list(real_sentence[1:real_sentence_length])
+        # 去掉采样池中的简单词
+        for token in sample_pool:
+            if token in filter_tokens:
+                sample_pool.remove(token)
+        real_sentence_sample_pool_repeat = (real_sentence_sample_num // (len(sample_pool)-1)) + 1
         for idx in range(1, real_sentence_length):
             cur_token = real_sentence[idx]
             # real sentence sample
-            real_sentence_sample_pool = list(real_sentence[1:real_sentence_length].repeat(real_sentence_sample_pool_repeat))
-            real_sentence_sample_pool.remove(cur_token)
+            real_sentence_sample_pool = sample_pool[:]
+            if cur_token in real_sentence_sample_pool:
+                real_sentence_sample_pool.remove(cur_token)
+            real_sentence_sample_pool *= real_sentence_sample_pool_repeat
             real_sentence_selected_tokens = random.sample(real_sentence_sample_pool, k=real_sentence_sample_num)
             selected_tokens = real_sentence_selected_tokens
             selected_tokens.insert(real_sentence_idx, cur_token)
@@ -289,7 +303,7 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
     model.eval()
     # filter special tokens
     special_tokens = tokenizer.convert_tokens_to_ids(['[PAD]','[SEP]'])
-    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':','the','a','of','and','s','to','it','is','that','in','as','on'])
+    simple_tokens = tokenizer.convert_tokens_to_ids(['.', ',', '"', '-',"'",'(',')',':',';','`','<','>','#','the','a','t','n','?','%','/','\\','&','$','of','br','and','s','##s','to','is','was','for','that','in','as','on'])
     filter_tokens = list(set(special_tokens + simple_tokens))
     if "cluster" in select_strategy:
         dataset_word_num = len(dataset_word_dict)

@@ -205,7 +205,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         selection_ids = torch.randint(low=1, high=100, size=batch['input_ids'][invalid_ids].size()).unsqueeze(1).to('cuda')
         selection_tokens = torch.gather(input=candidate_token_ids_top100[invalid_ids], dim=1, index=selection_ids)
         batch['input_ids'][invalid_ids] = selection_tokens.squeeze(1)
-    elif select_strategy == 'self_filling':
+    elif select_strategy == 'real_data':
         # 筛选出要替换的词
         invalid_ids = (batch['attention_mask'] == 0)
         invalid_ids[word_filter(batch['input_ids'], filter_tokens)] = True
@@ -246,7 +246,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
             selected_tokens.insert(real_sentence_idx, cur_token)
             selected_tokens = torch.tensor(selected_tokens)
             batch['input_ids'][:,idx] = selected_tokens
-    elif select_strategy=="realsen":
+    elif select_strategy=="input_self":
         real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
         real_sentence = batch['input_ids'][real_sentence_idx]
         real_sentence_sample_num = batch_size-1 # [0, num_instances-1] or (batch_size-1) // 2

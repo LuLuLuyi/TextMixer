@@ -268,10 +268,10 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         real_sentence = batch['input_ids'][real_sentence_idx]
         real_sentence_sample_num = batch_size-1 # [0, num_instances-1] or (batch_size-1) // 2
         sample_pool = list(real_sentence[1:real_sentence_length])
-        # 去掉采样池中的简单词
-        for token in sample_pool:
-            if token in filter_tokens:
-                sample_pool.remove(token)
+        # # 去掉采样池中的简单词
+        # for token in sample_pool:
+        #     if token in filter_tokens:
+        #         sample_pool.remove(token)
         if len(sample_pool) <= 1 :
             selection_ids = torch.randint(low=0, high=len(dataset_word_dict)-1, size=(real_sentence_sample_num,))
             selection_tokens = dataset_word_dict[selection_ids].to('cuda')

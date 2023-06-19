@@ -791,6 +791,20 @@ class MuxedBertForSequenceClassification(BertPreTrainedModel):
                     
             embedding_output = torch.mean(embedding_output, dim=1)
         
+        # get embedding output for real sentence
+        demuxed_embedding_output = self.demultiplexer(embedding_output)
+        real_sentence_demuxed_sequence_output = demuxed_embedding_output[real_sentence_idx].unsqueeze(0)
+        
+        position_attack_label = None
+        if self.config.position_encryption:
+            sep_idx = list(input_ids[real_sentence_idx]).index(102)
+            shuffle_idx = torch.randperm(sep_idx-1)
+            shuffle_idx += 1 
+            target_idx = torch.arange(0,embedding_output.size()[1])
+            target_idx[1:sep_idx] = shuffle_idx
+            position_attack_label = torch.full((embedding_output.size()[1],), -100)
+            position_attack_label[1:sep_idx] = shuffle_idx
+            embedding_output = embedding_output[:,target_idx,:]
         mux_embedding = embedding_output
 
         outputs = self.bert(
@@ -806,14 +820,13 @@ class MuxedBertForSequenceClassification(BertPreTrainedModel):
         sequence_output = outputs[0]
 
         if self.demuxing_variant != "index":
-            demuxed_sequence_output = self.demultiplexer(sequence_output)
+            demuxed_sequence_output = self.demultiplexer(sequence_output[:, 0:1, :])
         else:
             demuxed_sequence_output = self.demultiplexer(sequence_output)
             demuxed_sequence_output = demuxed_sequence_output[:, num_instances:num_instances+1, :]
         # demuxed_sequence_output = self.demultiplexer(sequence_output[:, 0:1, :])
         # demuxed_sequence_output = demuxed_sequence_output.squeeze(1)
-        real_sentence_demuxed_sequence_output = demuxed_sequence_output[real_sentence_idx].unsqueeze(0)
-        demuxed_sequence_output = demuxed_sequence_output[:, 0:1, :].squeeze(1)
+        demuxed_sequence_output = demuxed_sequence_output.squeeze(1)
         logits = self.classifier(self.dropout(demuxed_sequence_output))
         if labels is not None:
 
@@ -907,7 +920,8 @@ class MuxedBertForSequenceClassification(BertPreTrainedModel):
             retrieval_instance_labels=None,
             hidden_states=mux_embedding,
             # hidden_states=demuxed_sequence_output,
-            # hidden_states=real_sentence_demuxed_sequence_output
+            # hidden_states=real_sentence_demuxed_sequence_output,
+            position_attack_label=position_attack_label,
         )
 
 
@@ -1236,6 +1250,21 @@ class MuxedBertForTokenClassification(BertPreTrainedModel):
 
             embedding_output = torch.mean(embedding_output, dim=1)
             
+        # get embedding output for real sentence
+        demuxed_embedding_output = self.demultiplexer(embedding_output)
+        real_sentence_demuxed_sequence_output = demuxed_embedding_output[real_sentence_idx].unsqueeze(0)
+            
+        
+        position_attack_label = None
+        if self.config.position_encryption:
+            sep_idx = list(input_ids[real_sentence_idx]).index(102)
+            shuffle_idx = torch.randperm(sep_idx-1)
+            shuffle_idx += 1 
+            target_idx = torch.arange(0,embedding_output.size()[1])
+            target_idx[1:sep_idx] = shuffle_idx
+            position_attack_label = torch.full((embedding_output.size()[1],), -100)
+            position_attack_label[1:sep_idx] = shuffle_idx
+            embedding_output = embedding_output[:,target_idx,:]   
         mux_embedding = embedding_output
         
         outputs = self.bert(
@@ -1250,8 +1279,6 @@ class MuxedBertForTokenClassification(BertPreTrainedModel):
         sequence_output = outputs[0]
 
         demuxed_sequence_output = self.demultiplexer(sequence_output)
-        # get output for real sentence
-        real_sentence_demuxed_sequence_output = demuxed_sequence_output[real_sentence_idx].unsqueeze(0)
         demuxed_sequence_output = demuxed_sequence_output.squeeze(1)
         logits = self.classifier(self.dropout(demuxed_sequence_output))
 
@@ -1340,4 +1367,5 @@ class MuxedBertForTokenClassification(BertPreTrainedModel):
             hidden_states=mux_embedding,
             # hidden_states=real_sentence_demuxed_sequence_output,
             # hidden_states=demuxed_sequence_output,
+            position_attack_label=position_attack_label,
         )

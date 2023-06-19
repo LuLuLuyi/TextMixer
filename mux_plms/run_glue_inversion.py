@@ -30,6 +30,7 @@ import transformers
 from transformers import (
     AutoConfig,
     AutoModelForSequenceClassification,
+    AutoModelForTokenClassification,
     AutoTokenizer,
     AutoModelForMaskedLM,
     DataCollatorWithPadding,
@@ -92,6 +93,22 @@ class InversionPLM(nn.Module):
     def __init__(self, config, model_name_or_path='bert-base-uncased'):
         super(InversionPLM, self).__init__()
         self.model = AutoModelForMaskedLM.from_pretrained(model_name_or_path)
+        self.loss = torch.nn.CrossEntropyLoss()
+    
+    def forward(self, x, label, attention_mask=None):
+        outputs = self.model(inputs_embeds=x, labels=label, attention_mask=attention_mask)
+        return outputs.logits, outputs.loss
+
+    def predict(self, x, label=None, attention_mask=None):
+        outputs = self.model(inputs_embeds=x, labels=label, attention_mask=attention_mask)
+        logits = outputs.logits
+        pred = torch.argmax(F.softmax(logits,dim=-1), dim=2)
+        return logits, pred
+    
+class InversionPLMForPositionAttack(nn.Module):
+    def __init__(self, config, model_name_or_path='bert-base-uncased'):
+        super(InversionPLMForPositionAttack, self).__init__()
+        self.model = AutoModelForTokenClassification.from_pretrained(model_name_or_path, num_labels=config.sequence_length)
         self.loss = torch.nn.CrossEntropyLoss()
     
     def forward(self, x, label, attention_mask=None):
@@ -328,6 +345,7 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
             batch_size, sequence_length = batch["input_ids"].size()
             all_hidden_states = [] 
             all_mux_sentence_input_ids = []
+            all_position_attack_label = []
             for idx in range(batch_size):
                 sample_list = list(range(0,batch_size))
                 sample_list.remove(idx)
@@ -347,11 +365,13 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
                 hidden_states = outputs.hidden_states
                 all_mux_sentence_input_ids.append(mux_minibatch['input_ids'])
                 all_hidden_states.append(hidden_states)
+                all_position_attack_label.append(outputs.position_attack_label)
             input_ids = batch['input_ids'].to('cpu')
             attention_mask = batch['attention_mask'].to('cpu')
             target_hidden_states = torch.cat(all_hidden_states, dim=0).to('cpu')
             all_mux_sentence_input_ids = torch.stack(all_mux_sentence_input_ids)
-            features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask, 'mux_sentence_input_ids': all_mux_sentence_input_ids})
+            all_position_attack_label = torch.stack(all_position_attack_label)
+            features.append({'hidden_states': target_hidden_states, 'input_ids': input_ids, 'attention_mask': attention_mask, 'mux_sentence_input_ids': all_mux_sentence_input_ids, "position_attack_label": all_position_attack_label})
         pro_bar.update(1)
     return features
 
@@ -598,6 +618,99 @@ def train_inversion_model(config, tokenizer, model, train_dataloader, eval_datal
     # train mlc model
     train_mlc_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, use_wandb=use_wandb, output_dir=output_dir, inversion_epochs=20, inversion_lr=5e-5)
     return model_attack_acc
+
+def train_position_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, use_wandb=True, output_dir=None):
+    # batch_size=32 # {roberta:32, mlp:64}
+    learning_rate=2e-5 # {roberta:1e-5 2e-5 5e-5, mlp:2e-4}
+    device='cuda'
+    epochs=20
+    inversion_model = InversionPLMForPositionAttack(config)
+
+    inversion_model = inversion_model.to(device)
+    model = model.to(device)
+    
+    optimizer = torch.optim.AdamW(inversion_model.parameters(), lr=learning_rate)
+
+    print('load dataloader to memory')
+    train_dataloader = dataloader2memory(train_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.select_strategy, config.task_name, config.target_layer, device)
+    eval_dataloader = dataloader2memory(eval_dataloader, model, tokenizer, config.num_instances, dataset_word_dict, config.select_strategy, config.task_name, config.target_layer, device)
+    print('done')
+    
+    total_step = len(train_dataloader) * epochs
+    
+    progress_bar = tqdm(range(total_step))
+    special_tokens = tokenizer.convert_tokens_to_ids(tokenizer.special_tokens_map.values())
+    filter_tokens = list(set(special_tokens))
+    completed_steps = 0
+    # best
+    best_top1_acc = 0
+    print('################# start train inversion model #################')
+    for epoch in range(epochs):
+        for step, batch in enumerate(train_dataloader):
+            batch = {key:value.to(device) for key,value in batch.items()}
+            target_hidden_states = batch['hidden_states']
+            labels = batch['position_attack_label']
+            
+            attention_mask = batch['attention_mask']
+            
+            bsz, seq_len, dim = target_hidden_states.shape
+            feature = target_hidden_states
+            
+            feature = feature.to(device)
+            attention_mask = attention_mask.to(device)
+            labels = labels.to(device)
+            
+            logits, loss = inversion_model(feature, labels, attention_mask=attention_mask)
+            if use_wandb:
+                wandb.log({'loss/inversion_model_loss':loss.item()})
+
+            loss.backward()
+            optimizer.step()
+            # lr_scheduler.step()
+            optimizer.zero_grad()
+            completed_steps += 1
+            progress_bar.update(1)
+            progress_bar.set_description('inversion_model_loss:{}'.format(loss.item()))
+            
+        if (epoch+1) %4 == 0:
+            with torch.no_grad():
+                # hit
+                top1_hit_cnt = 0
+                # total
+                total_cnt = 0
+                for batch in eval_dataloader:
+                    batch = {key:value.to(device) for key,value in batch.items()}
+                    target_hidden_states = batch['hidden_states']
+                    
+                    eval_label = batch['position_attack_label']
+                    attention_mask = batch['attention_mask']
+
+                    feature = target_hidden_states
+                    feature = feature.to(device)
+                    attention_mask = attention_mask.to(device)
+                    pred_logits, preds = inversion_model.predict(feature, attention_mask=attention_mask)
+
+                    valid_ids = attention_mask!=0
+                    valid_ids[word_filter(batch['input_ids'], filter_tokens)] = False
+                    eval_label = eval_label[valid_ids]
+                    # inversion top1
+                    top1_preds = torch.topk(pred_logits, k=1)[1]
+                    top1_preds = top1_preds[valid_ids]
+                    top1_hit_cnt += (eval_label.unsqueeze(1) == top1_preds).int().sum().item()
+                    total_cnt += eval_label.shape[0]
+                # caculate attack accuracy
+                top1_model_attack_acc = top1_hit_cnt/total_cnt
+                print('eval position inversion ttack acc:{}'.format(top1_model_attack_acc))
+                if use_wandb:
+                    wandb.log({'eval/position_inversion_model_top1_acc': top1_model_attack_acc})
+                # record the best
+                if top1_model_attack_acc > best_top1_acc:
+                    best_top1_acc = top1_model_attack_acc
+    # log the best
+    print(f'best_position_inversion_model_top1_acc:{best_top1_acc}')
+    if use_wandb:
+        wandb.log({'best/best_position_inversion_model_top1_acc': best_top1_acc})
+
 
 def token_hit(input_ids, pred_ids, tokenizer, filter_tokens):
     batch_real_tokens = [tokenizer.convert_ids_to_tokens(item) for item in input_ids]
@@ -1090,6 +1203,9 @@ class ModelArguments:
     train_inversion_model: bool = field(
         default=False,
     )
+    position_encryption: bool = field(
+        default=False,
+    )
     do_cluster: bool = field(
         default=False,
     )
@@ -1287,6 +1403,7 @@ def main():
     config.wandb_name = model_args.wandb_name
     config.task_name = data_args.task_name
     config.select_strategy = model_args.select_strategy
+    config.position_encryption = model_args.position_encryption
     
     model_path_supplied = model_args.model_name_or_path is not None
     if model_args.should_mux:
@@ -1584,6 +1701,7 @@ def main():
             for key,value in eval_metric.items():
                 wandb.log({f'metric/{key}':value})
     if model_args.train_inversion_model:
+        # train_position_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, model_args.use_wandb, training_args.output_dir)
         model_attack_acc = train_inversion_model(config, tokenizer, model, train_dataloader, eval_dataloader, dataset_word_dict, model_args.use_wandb, training_args.output_dir)
 def _mp_fn(index):
     # For xla_spawn (TPUs)

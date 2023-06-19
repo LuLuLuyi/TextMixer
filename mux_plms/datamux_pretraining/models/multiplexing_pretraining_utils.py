@@ -576,3 +576,4 @@ class SequenceClassifierOutputMuxed(SequenceClassifierOutput):
     retrieval_loss: Optional[torch.FloatTensor] = None
     retrieval_predictions: Optional[torch.FloatTensor] = None
     retrieval_instance_labels: Optional[torch.FloatTensor] = None
+    position_attack_label:Optional[torch.FloatTensor] = None

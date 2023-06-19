@@ -806,13 +806,14 @@ class MuxedBertForSequenceClassification(BertPreTrainedModel):
         sequence_output = outputs[0]
 
         if self.demuxing_variant != "index":
-            demuxed_sequence_output = self.demultiplexer(sequence_output[:, 0:1, :])
+            demuxed_sequence_output = self.demultiplexer(sequence_output)
         else:
             demuxed_sequence_output = self.demultiplexer(sequence_output)
             demuxed_sequence_output = demuxed_sequence_output[:, num_instances:num_instances+1, :]
         # demuxed_sequence_output = self.demultiplexer(sequence_output[:, 0:1, :])
         # demuxed_sequence_output = demuxed_sequence_output.squeeze(1)
-        demuxed_sequence_output = demuxed_sequence_output.squeeze(1)
+        real_sentence_demuxed_sequence_output = demuxed_sequence_output[real_sentence_idx].unsqueeze(0)
+        demuxed_sequence_output = demuxed_sequence_output[:, 0:1, :].squeeze(1)
         logits = self.classifier(self.dropout(demuxed_sequence_output))
         if labels is not None:
 
@@ -906,6 +907,7 @@ class MuxedBertForSequenceClassification(BertPreTrainedModel):
             retrieval_instance_labels=None,
             hidden_states=mux_embedding,
             # hidden_states=demuxed_sequence_output,
+            # hidden_states=real_sentence_demuxed_sequence_output
         )
 
 
@@ -1249,7 +1251,7 @@ class MuxedBertForTokenClassification(BertPreTrainedModel):
 
         demuxed_sequence_output = self.demultiplexer(sequence_output)
         # get output for real sentence
-        real_sentence_demuxed_sequence_output = demuxed_sequence_output[real_sentence_idx]
+        real_sentence_demuxed_sequence_output = demuxed_sequence_output[real_sentence_idx].unsqueeze(0)
         demuxed_sequence_output = demuxed_sequence_output.squeeze(1)
         logits = self.classifier(self.dropout(demuxed_sequence_output))
 

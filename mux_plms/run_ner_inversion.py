@@ -269,6 +269,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         # 把假句子用自身填满
         filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
         batch['input_ids'][invalid_ids] = filled_input_ids[invalid_ids]
+        batch['input_ids'][:,real_sentence_length-1] = 1012
         batch['input_ids'][:,real_sentence_length:] = 0
         batch['input_ids'][:,real_sentence_length] = 102
     elif select_strategy=="cluster":
@@ -313,6 +314,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
             selected_tokens.insert(real_sentence_idx, cur_token)
             selected_tokens = torch.tensor(selected_tokens)
             batch['input_ids'][:,idx] = selected_tokens
+        batch['input_ids'][:,real_sentence_length-1] = 1012
         batch['input_ids'][:,real_sentence_length:] = 0
         batch['input_ids'][:,real_sentence_length] = 102
     elif select_strategy=="cluster_realsen":

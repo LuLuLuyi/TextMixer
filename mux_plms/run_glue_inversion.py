@@ -150,7 +150,7 @@ class InversionPLMMLC(nn.Module):
         pred = torch.round(self.sigmod(torch.mean(logits, dim=1))) # (bsz, vocab_size)
         return logits, pred
 
-def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict, select_strategy='None',  token2cluster=None, clusters2token_list=None): 
+def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_word_dict, select_strategy='None',  token2cluster=None, clusters2token_list=None, tokenizer=None): 
     batch_size, sequence_length = batch['input_ids'].size()
     emb = model.bert.embeddings.word_embeddings.weight
     dataset_word_dict = torch.tensor(dataset_word_dict)
@@ -247,6 +247,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         # 把假句子用自身填满
         filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
         batch['input_ids'][invalid_ids] = filled_input_ids[invalid_ids]
+        batch['input_ids'][:,real_sentence_length-1] = 1012
         batch['input_ids'][:,real_sentence_length:] = 0
         batch['input_ids'][:,real_sentence_length] = 102
     elif select_strategy=="cluster":
@@ -291,6 +292,7 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
             selected_tokens.insert(real_sentence_idx, cur_token)
             selected_tokens = torch.tensor(selected_tokens)
             batch['input_ids'][:,idx] = selected_tokens
+        batch['input_ids'][:,real_sentence_length-1] = 1012
         batch['input_ids'][:,real_sentence_length:] = 0
         batch['input_ids'][:,real_sentence_length] = 102
     elif select_strategy=="cluster_realsen":
@@ -363,7 +365,7 @@ def dataloader2memory(dataloader, model, tokenizer, num_instances, dataset_word_
                 
                 mux_minibatch = {key:value[mux_sentence_ids] for key,value in batch.items()}
                 if select_strategy != 'None':
-                    mux_minibatch = mux_token_selection(model, filter_tokens, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list)
+                    mux_minibatch = mux_token_selection(model, filter_tokens, mux_minibatch, real_sentence_idx, dataset_word_dict, select_strategy, token2cluster, clusters2token_list, tokenizer)
                 mux_minibatch['real_sentence_idx'] = real_sentence_idx
                 outputs = model(**mux_minibatch)
                 hidden_states = outputs.hidden_states

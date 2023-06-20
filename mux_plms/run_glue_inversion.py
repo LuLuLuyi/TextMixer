@@ -247,6 +247,8 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
         # 把假句子用自身填满
         filled_input_ids[real_sentence_idx] = batch['input_ids'][real_sentence_idx]
         batch['input_ids'][invalid_ids] = filled_input_ids[invalid_ids]
+        batch['input_ids'][:,real_sentence_length:] = 0
+        batch['input_ids'][:,real_sentence_length] = 102
     elif select_strategy=="cluster":
         real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
         real_sentence = batch['input_ids'][real_sentence_idx]

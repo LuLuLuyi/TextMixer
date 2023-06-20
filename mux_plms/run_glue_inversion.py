@@ -289,6 +289,8 @@ def mux_token_selection(model, filter_tokens, batch, real_sentence_idx, dataset_
             selected_tokens.insert(real_sentence_idx, cur_token)
             selected_tokens = torch.tensor(selected_tokens)
             batch['input_ids'][:,idx] = selected_tokens
+        batch['input_ids'][:,real_sentence_length:] = 0
+        batch['input_ids'][:,real_sentence_length] = 102
     elif select_strategy=="cluster_realsen":
         real_sentence_length = list(batch['input_ids'][real_sentence_idx]).index(102)
         real_sentence = batch['input_ids'][real_sentence_idx]
@@ -1404,6 +1406,7 @@ def main():
     config.task_name = data_args.task_name
     config.select_strategy = model_args.select_strategy
     config.position_encryption = model_args.position_encryption
+    config.sequence_length = data_args.max_seq_length
     
     model_path_supplied = model_args.model_name_or_path is not None
     if model_args.should_mux:
